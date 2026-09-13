@@ -4,12 +4,9 @@
 
 namespace YuMediaPlayer
 {
-	
+
 
 
 
 
 }
-
-
-
