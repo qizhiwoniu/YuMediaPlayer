@@ -22,8 +22,8 @@ option(USE_WIN32 "Use Win32 GUI subsystem" OFF)
 #endif()  
 
 target_include_directories(YuMediaPlayer PRIVATE
-    "${CMAKE_SOURCE_DIR}/src"
-    "${CMAKE_SOURCE_DIR}/thirdParty"
+    "${CMAKE_SOURCE_DIR}/Src"
+    "${CMAKE_SOURCE_DIR}/ThirdParty"
 )
 
 target_link_libraries(YuMediaPlayer) 

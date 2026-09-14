@@ -4,6 +4,7 @@
 #include <memory>
 #include <windowsx.h>
 #include "Core/Theme.h"
+#include "UI/miniWindowGUI.h"
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -32,14 +33,16 @@ namespace YuMediaPlayer
 
 		int clientW = rc.right - rc.left;
 		int clientH = rc.bottom - rc.top;
-		
+
 		/*if (!InitD3D11(clientW, clientH))
 			return false;
 
 		if (!InitDocument(clientW, clientH))
 			return false;*/
 
-		/*return  m_uiManager.Init(m_hwnd, m_device->GetDevice(), m_device->GetContext());*/
+			/*return  m_uiManager.Init(m_hwnd, m_device->GetDevice(), m_device->GetContext());*/
+
+		return true; // 修复：原来这里没有返回值，函数是 bool 但会导致未定义行为
 	}
 
 	void MainWindow::Run()
@@ -71,8 +74,14 @@ namespace YuMediaPlayer
 		}
 
 	}
+
 	LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
+		// 修复：原来这里有一段坏掉的 switch/if/case 混合代码，
+		// case WM_CONTEXTMENU 被嵌在 if(msg == WM_RBUTTONDOWN) 内部，
+		// 导致这两个条件不可能同时满足，右键菜单代码是死代码，已删除。
+		// 右键菜单逻辑现在统一放到 EventProc 的 WM_CONTEXTMENU 分支处理。
+
 		MainWindow* pThis = nullptr;
 		if (msg == WM_NCCREATE)
 		{
@@ -144,6 +153,22 @@ namespace YuMediaPlayer
 		MARGINS margins = { 1,1,1,1 };
 		DwmExtendFrameIntoClientArea(m_hwnd, &margins); // Win10/11 都有阴影
 
+		// 去掉 WS_THICKFRAME 窗口自带的那条 1px 强调色描边。
+		// DWMWA_BORDER_COLOR 是 Windows 11 22H2 (22621) 之后才有的属性，
+		// 老版本 SDK 头文件里可能没有对应的宏定义，这里手动兜底一下。
+		// 在不支持的系统（Win10 / 更老的 Win11）上这个调用会返回失败，
+		// 属于安全失败，不影响其余逻辑，所以直接无条件调用即可。
+#ifndef DWMWA_BORDER_COLOR
+#define DWMWA_BORDER_COLOR 34
+#endif
+#ifndef DWMWA_COLOR_NONE
+#define DWMWA_COLOR_NONE 0xFFFFFFFE
+#endif
+		{
+			COLORREF borderColor = DWMWA_COLOR_NONE;
+			DwmSetWindowAttribute(m_hwnd, DWMWA_BORDER_COLOR, &borderColor, sizeof(borderColor));
+		}
+
 		// ── 居中到主显示器 ──────────────────────────────────────
 		{
 			HMONITOR hMon = MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST);
@@ -173,8 +198,64 @@ namespace YuMediaPlayer
 	{
 		switch (msg)
 		{
+		case WM_CONTEXTMENU:
+		{
+			// WM_CONTEXTMENU 的 lParam 本身就是屏幕坐标，不需要 ClientToScreen 转换
+			POINT pt;
+			pt.x = GET_X_LPARAM(lParam);
+			pt.y = GET_Y_LPARAM(lParam);
+			int cmd = ShowMiniPlayerContextMenu(hwnd, pt);
+			if (cmd == ContextMenuCommand::Exit)
+				PostQuitMessage(0);
+			return 0;
+		}
+		case WM_NCRBUTTONUP:
+		{
+			// 底部 70px 的"空白拖动区"在 WM_NCHITTEST 里返回的是 HTCAPTION，落在非客户区，
+			// 右键点这块地方 Windows 发的是 WM_NCRBUTTONUP 而不是 WM_CONTEXTMENU，
+			// 所以这里也要单独处理，否则拖动区右键没反应。
+			// NC 消息的 lParam 本身就是屏幕坐标，wParam 是命中测试结果。
+			if (wParam == HTCAPTION)
+			{
+				POINT pt;
+				pt.x = GET_X_LPARAM(lParam);
+				pt.y = GET_Y_LPARAM(lParam);
+				int cmd = ShowMiniPlayerContextMenu(hwnd, pt);
+				if (cmd == ContextMenuCommand::Exit)
+					PostQuitMessage(0);
+				return 0; // 吞掉默认行为（系统菜单），避免和我们自己的菜单冲突
+			}
+			break;
+		}
+		case WM_MEASUREITEM:
+			// 右键菜单是自绘的（owner-draw），系统在弹出前先发这个消息
+			// 来问每一项应该占多大尺寸，交给 miniWindowGUI 里统一处理。
+			MeasureMiniPlayerMenuItem(*reinterpret_cast<MEASUREITEMSTRUCT*>(lParam));
+			return TRUE;
+		case WM_DRAWITEM:
+			// 同上，真正把每一项画出来（黑色背景 + 白色文字）的地方。
+			DrawMiniPlayerMenuItem(*reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
+			return TRUE;
 		case WM_ERASEBKGND:
 			return 1;
+		case WM_PAINT:
+		{
+			// 修复暗黑模式背景发白的问题：之前 WM_ERASEBKGND 返回 1 阻止了系统擦除背景，
+			// 但没有任何地方真正绘制客户区，导致颜色是未定义的（多数情况下显示白色/残影）。
+			// 这里先用 GDI 填一个深色纯色，后续接入真正的渲染（D3D/ImGui等）后可以删掉这段，
+			// 改成用 m_theme 里定义的背景色，或者干脆交给渲染层处理。
+			PAINTSTRUCT ps;
+			HDC hdc = BeginPaint(hwnd, &ps);
+
+			RECT rc;
+			GetClientRect(hwnd, &rc);
+
+			static HBRUSH s_darkBrush = CreateSolidBrush(RGB(24, 24, 24)); // 深色背景，可按需替换为主题色
+			FillRect(hdc, &rc, s_darkBrush);
+
+			EndPaint(hwnd, &ps);
+			return 0;
+		}
 		case WM_NCCALCSIZE:
 		{
 			if (wParam)
@@ -189,18 +270,6 @@ namespace YuMediaPlayer
 			UINT h = HIWORD(lParam);
 
 			return 0;
-		}
-		case WM_NCLBUTTONDBLCLK: // 双击顶部大化与恢复
-		{
-			if (wParam == HTCAPTION)
-			{
-				if (IsZoomed(hwnd))
-					ShowWindow(hwnd, SW_RESTORE);
-				else
-					ShowWindow(hwnd, SW_MAXIMIZE);
-				return 0;
-			}
-			break;
 		}
 		case WM_NCHITTEST:
 		{
@@ -229,7 +298,7 @@ namespace YuMediaPlayer
 			if (right)  return HTRIGHT;
 			if (top)    return HTTOP;
 			if (bottom) return HTBOTTOM;
-			// 拖动
+			// 拖动（左键空白处拖动窗口）
 			/*if (pt.y >= wr.top && pt.y < wr.top + 30)
 			{
 				return HTCAPTION;
@@ -238,6 +307,10 @@ namespace YuMediaPlayer
 			{
 				return HTCAPTION;
 			}
+			// 修复：原来这里有 if (msg == WM_RBUTTONDOWN) return WM_CONTEXTMENU;
+			// msg 在这个分支里恒等于 WM_NCHITTEST，不可能等于 WM_RBUTTONDOWN，
+			// 而且 WM_NCHITTEST 应该返回 HT* 命中测试码而不是消息号，已删除该行。
+			// 右键弹出菜单会由 WM_CONTEXTMENU 消息自动触发，不需要在这里处理。
 			return HTCLIENT;
 		}
 		case WM_GETMINMAXINFO:
@@ -266,8 +339,8 @@ namespace YuMediaPlayer
 		default:
 			return DefWindowProc(hwnd, msg, wParam, lParam);
 		}
-	}
 
+		return DefWindowProc(hwnd, msg, wParam, lParam);
+	}
 	
 }
-
