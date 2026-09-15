@@ -79,11 +79,11 @@ MiniCAD
 ```
 ---
 # feature
-  V1.0.0 主要功能 main          </br>
-  V1.1.0 新增功能 update        </br>
-  V1.2.0 修复     bug fix       </br>
-  V1.3.0 ...      ...           </br>
+  V1.0.0 主要功能 main      </br>
+  V1.1.0 新增功能 update    </br>
+  V1.2.0 修复     bug fix   </br>
+  V1.3.0 ...      ...       </br>
 # thanks
   myfather
 
-*日期：2026-09-13* 
+*日期：2026-09-15* 
