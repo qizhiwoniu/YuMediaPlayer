@@ -18,7 +18,7 @@ option(USE_WIN32 "Use Win32 GUI subsystem" OFF)
 #    add_executable(YuMediaPlayer WIN32 ${SRC})
 #    target_compile_definitions(YuMediaPlayer PRIVATE USE_WIN32)
 #else()
-    add_executable(YuMediaPlayer ${SRC})
+     add_executable(YuMediaPlayer ${SRC})
 #endif()  
 
 target_include_directories(YuMediaPlayer PRIVATE
