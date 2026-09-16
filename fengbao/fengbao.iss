@@ -35,8 +35,8 @@ ArchitecturesInstallIn64BitMode=x64compatible
 ChangesAssociations=yes
 DefaultGroupName={#MyAppName}
 AllowNoIcons=yes
-LicenseFile=C:\Users\Administrator\Documents\License\license.txt
-InfoBeforeFile=C:\Users\Administrator\Documents\License\headlicense.txt
+LicenseFile=C:\Users\Administrator\Documents\License\SoftwareLic.txt
+InfoBeforeFile=C:\Users\Administrator\Documents\License\Softheadlicense.txt
 ; Uncomment the following line to run in non administrative install mode (install for current user only).
 ;PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
