@@ -23,6 +23,10 @@ option(USE_WIN32 "Use Win32 GUI subsystem" OFF)
 
 target_include_directories(YuMediaPlayer PRIVATE
     "${CMAKE_SOURCE_DIR}/Src"
+    "${CMAKE_SOURCE_DIR}/Src/App"
+    "${CMAKE_SOURCE_DIR}/Src/Core"
+    "${CMAKE_SOURCE_DIR}/Src/NotifyIcon"
+    "${CMAKE_SOURCE_DIR}/Src/UI"
     "${CMAKE_SOURCE_DIR}/ThirdParty"
 )
 

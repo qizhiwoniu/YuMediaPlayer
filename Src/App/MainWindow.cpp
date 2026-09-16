@@ -28,21 +28,15 @@ namespace YuMediaPlayer
 		RECT rc;
 		GetClientRect(m_hwnd, &rc);
 
-		m_trayIcon.Create(m_hwnd); // 创建托盘图标
-		m_trayIcon.ShowBalloon(L"YuMediaPlayer 已启动", L"程序正在运行中...");
+		m_trayIcon.Create(m_hwnd);  
+		m_trayIcon.ShowBalloon(L"YuMediaPlayer starting", L"starting...");
 
 		int clientW = rc.right - rc.left;
 		int clientH = rc.bottom - rc.top;
 
-		/*if (!InitD3D11(clientW, clientH))
-			return false;
+		Composite();
 
-		if (!InitDocument(clientW, clientH))
-			return false;*/
-
-			/*return  m_uiManager.Init(m_hwnd, m_device->GetDevice(), m_device->GetContext());*/
-
-		return true; // 修复：原来这里没有返回值，函数是 bool 但会导致未定义行为
+		return true; 
 	}
 
 	void MainWindow::Run()
@@ -68,139 +62,49 @@ namespace YuMediaPlayer
 				}
 				else
 				{
-					WaitMessage(); // 等待新消息，节省 CPU
+					WaitMessage(); // 
 				}
 			}
 		}
 
 	}
 
-	LRESULT MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
-	{
-		// 修复：原来这里有一段坏掉的 switch/if/case 混合代码，
-		// case WM_CONTEXTMENU 被嵌在 if(msg == WM_RBUTTONDOWN) 内部，
-		// 导致这两个条件不可能同时满足，右键菜单代码是死代码，已删除。
-		// 右键菜单逻辑现在统一放到 EventProc 的 WM_CONTEXTMENU 分支处理。
-
-		MainWindow* pThis = nullptr;
-		if (msg == WM_NCCREATE)
-		{
-			auto* cs = reinterpret_cast<CREATESTRUCTW*>(lParam);
-			pThis = reinterpret_cast<MainWindow*>(cs->lpCreateParams);
-			SetWindowLongPtrW(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
-		}
-		else
-		{
-			pThis = reinterpret_cast<MainWindow*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
-		}
-
-		if (pThis)
-			return pThis->EventProc(hwnd, msg, wParam, lParam);
-
-		return DefWindowProc(hwnd, msg, wParam, lParam);
-	}
-
-	bool MainWindow::InitWindow(const wchar_t* title, int width, int height)
-	{
-		HINSTANCE hInstance = GetModuleHandle(NULL);
-
-		WNDCLASSEXW wc = {};
-		wc.cbSize = sizeof(wc);
-		wc.style = CS_HREDRAW | CS_VREDRAW;
-		wc.lpfnWndProc = WndProc;
-		wc.hInstance = hInstance;
-		wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-		wc.hbrBackground = nullptr;
-		wc.lpszClassName = L"YuMediaPlayerMainWindows1";
-		wc.hIcon = (HICON)LoadImageW(
-			nullptr,
-			L"icons/logo.ico",
-			IMAGE_ICON,
-			0,
-			0,
-			LR_LOADFROMFILE | LR_DEFAULTSIZE
-		);
-
-		wc.hIconSm = (HICON)LoadImageW(
-			nullptr,
-			L"icons/logo.ico",
-			IMAGE_ICON,
-			GetSystemMetrics(SM_CXSMICON),
-			GetSystemMetrics(SM_CYSMICON),
-			LR_LOADFROMFILE
-		);
-		// 1. 注册窗口
-		RegisterClassEx(&wc);
-
-		RECT rc = { 0, 0, width, height };
-		AdjustWindowRect(&rc, WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX, TRUE); //WS_OVERLAPPEDWINDOW
-
-		// 2. 创建窗口
-		m_hwnd = CreateWindowEx(
-			0,
-			L"YuMediaPlayerMainWindows1",
-			title,
-			WS_POPUP | WS_THICKFRAME | WS_MINIMIZEBOX, //  WS_OVERLAPPEDWINDOW  ， WS_THICKFRAME 阴影
-			CW_USEDEFAULT,
-			CW_USEDEFAULT,
-			rc.right - rc.left,
-			rc.bottom - rc.top,
-			nullptr,
-			nullptr,
-			wc.hInstance,
-			this); // 参数this
-
-		MARGINS margins = { 1,1,1,1 };
-		DwmExtendFrameIntoClientArea(m_hwnd, &margins); // Win10/11 都有阴影
-
-		// 去掉 WS_THICKFRAME 窗口自带的那条 1px 强调色描边。
-		// DWMWA_BORDER_COLOR 是 Windows 11 22H2 (22621) 之后才有的属性，
-		// 老版本 SDK 头文件里可能没有对应的宏定义，这里手动兜底一下。
-		// 在不支持的系统（Win10 / 更老的 Win11）上这个调用会返回失败，
-		// 属于安全失败，不影响其余逻辑，所以直接无条件调用即可。
-#ifndef DWMWA_BORDER_COLOR
-#define DWMWA_BORDER_COLOR 34
-#endif
-#ifndef DWMWA_COLOR_NONE
-#define DWMWA_COLOR_NONE 0xFFFFFFFE
-#endif
-		{
-			COLORREF borderColor = DWMWA_COLOR_NONE;
-			DwmSetWindowAttribute(m_hwnd, DWMWA_BORDER_COLOR, &borderColor, sizeof(borderColor));
-		}
-
-		// ── 居中到主显示器 ──────────────────────────────────────
-		{
-			HMONITOR hMon = MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST);
-			MONITORINFO mi = { sizeof(mi) };
-			GetMonitorInfo(hMon, &mi);
-
-			int monW = mi.rcWork.right - mi.rcWork.left;
-			int monH = mi.rcWork.bottom - mi.rcWork.top;
-			int winW = rc.right - rc.left;
-			int winH = rc.bottom - rc.top;
-
-			int posX = mi.rcWork.left + (monW - winW) / 2;
-			int posY = mi.rcWork.top + (monH - winH) / 2;
-
-			SetWindowPos(m_hwnd, nullptr, posX, posY, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-		}
-		// 3.显示窗口
-		ShowWindow(m_hwnd, SW_SHOW);
-
-		// 4.更新窗口
-		UpdateWindow(m_hwnd);
-
-		return m_hwnd != nullptr;
-	}
-
+	
 	LRESULT MainWindow::EventProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
 		switch (msg)
 		{
+		case WM_ENTERSIZEMOVE:
+		{
+			m_isMoving = true;
+			return 0;
+		}
+		case WM_MOVING:
+		{
+			return DefWindowProc(hwnd, msg, wParam, lParam);
+		}
+		case WM_EXITSIZEMOVE:
+		{
+			m_isMoving = false;
+			if (!m_isCollapsed)
+				CheckAndCollapseAtEdge();
+			return 0;
+		}
+		case WM_TIMER:
+		{
+			if (wParam == 1001)
+			{
+				if (m_isCollapsed)
+					CheckCollapsedMouseHover();
+				else if (!m_isMoving)
+					CheckAutoCollapse();
+
+				return 0;
+			}
+			break;
+		}
 		case WM_CONTEXTMENU:
 		{
-			// WM_CONTEXTMENU 的 lParam 本身就是屏幕坐标，不需要 ClientToScreen 转换
 			POINT pt;
 			pt.x = GET_X_LPARAM(lParam);
 			pt.y = GET_Y_LPARAM(lParam);
@@ -211,10 +115,6 @@ namespace YuMediaPlayer
 		}
 		case WM_NCRBUTTONUP:
 		{
-			// 底部 70px 的"空白拖动区"在 WM_NCHITTEST 里返回的是 HTCAPTION，落在非客户区，
-			// 右键点这块地方 Windows 发的是 WM_NCRBUTTONUP 而不是 WM_CONTEXTMENU，
-			// 所以这里也要单独处理，否则拖动区右键没反应。
-			// NC 消息的 lParam 本身就是屏幕坐标，wParam 是命中测试结果。
 			if (wParam == HTCAPTION)
 			{
 				POINT pt;
@@ -223,34 +123,27 @@ namespace YuMediaPlayer
 				int cmd = ShowMiniPlayerContextMenu(hwnd, pt);
 				if (cmd == ContextMenuCommand::Exit)
 					PostQuitMessage(0);
-				return 0; // 吞掉默认行为（系统菜单），避免和我们自己的菜单冲突
+				return 0; 
 			}
 			break;
 		}
-		case WM_MEASUREITEM:
-			// 右键菜单是自绘的（owner-draw），系统在弹出前先发这个消息
-			// 来问每一项应该占多大尺寸，交给 miniWindowGUI 里统一处理。
+		case WM_MEASUREITEM:	
 			MeasureMiniPlayerMenuItem(*reinterpret_cast<MEASUREITEMSTRUCT*>(lParam));
 			return TRUE;
 		case WM_DRAWITEM:
-			// 同上，真正把每一项画出来（黑色背景 + 白色文字）的地方。
 			DrawMiniPlayerMenuItem(*reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
 			return TRUE;
 		case WM_ERASEBKGND:
 			return 1;
 		case WM_PAINT:
 		{
-			// 修复暗黑模式背景发白的问题：之前 WM_ERASEBKGND 返回 1 阻止了系统擦除背景，
-			// 但没有任何地方真正绘制客户区，导致颜色是未定义的（多数情况下显示白色/残影）。
-			// 这里先用 GDI 填一个深色纯色，后续接入真正的渲染（D3D/ImGui等）后可以删掉这段，
-			// 改成用 m_theme 里定义的背景色，或者干脆交给渲染层处理。
 			PAINTSTRUCT ps;
 			HDC hdc = BeginPaint(hwnd, &ps);
 
 			RECT rc;
 			GetClientRect(hwnd, &rc);
 
-			static HBRUSH s_darkBrush = CreateSolidBrush(RGB(24, 24, 24)); // 深色背景，可按需替换为主题色
+			static HBRUSH s_darkBrush = CreateSolidBrush(RGB(24, 24, 24)); // blackground
 			FillRect(hdc, &rc, s_darkBrush);
 
 			EndPaint(hwnd, &ps);
@@ -260,7 +153,7 @@ namespace YuMediaPlayer
 		{
 			if (wParam)
 			{
-				return 0;  // 完全移除 non-client area
+				return 0;  
 			}
 			break;
 		}
@@ -268,12 +161,33 @@ namespace YuMediaPlayer
 		{
 			UINT w = LOWORD(lParam);
 			UINT h = HIWORD(lParam);
+			Composite(); 
+			return 0;
+		}
+		case WM_LBUTTONUP:
+		{
+			if (m_isCollapsed)
+			{
+				RestoreWindow();
+				return 0;
+			}
+			return 0;
+		}
+		case WM_MOUSEMOVE:
+		{
+			POINT pt;
+			GetCursorPos(&pt);
+			m_lastMousePos = pt;
+			m_lastMouseMoveTick = GetTickCount();
+
+			if (m_isCollapsed)
+				CheckCollapsedMouseHover();
 
 			return 0;
 		}
 		case WM_NCHITTEST:
 		{
-			const LONG border = 6; // resize 边框厚度
+			const LONG border = 6; 
 
 			POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
 			RECT wr;
@@ -293,12 +207,11 @@ namespace YuMediaPlayer
 			if (bottom && left)  return HTBOTTOMLEFT;
 			if (bottom && right) return HTBOTTOMRIGHT;
 
-			// 边
+			// bian
 			if (left)   return HTLEFT;
 			if (right)  return HTRIGHT;
 			if (top)    return HTTOP;
 			if (bottom) return HTBOTTOM;
-			// 拖动（左键空白处拖动窗口）
 			/*if (pt.y >= wr.top && pt.y < wr.top + 30)
 			{
 				return HTCAPTION;
@@ -307,15 +220,10 @@ namespace YuMediaPlayer
 			{
 				return HTCAPTION;
 			}
-			// 修复：原来这里有 if (msg == WM_RBUTTONDOWN) return WM_CONTEXTMENU;
-			// msg 在这个分支里恒等于 WM_NCHITTEST，不可能等于 WM_RBUTTONDOWN，
-			// 而且 WM_NCHITTEST 应该返回 HT* 命中测试码而不是消息号，已删除该行。
-			// 右键弹出菜单会由 WM_CONTEXTMENU 消息自动触发，不需要在这里处理。
 			return HTCLIENT;
 		}
 		case WM_GETMINMAXINFO:
 		{
-			// 告诉 Windows 最大化时覆盖哪个显示器的工作区
 			HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
 
 			MONITORINFO mi = { sizeof(mi) };
@@ -333,6 +241,11 @@ namespace YuMediaPlayer
 			return 0;
 		}
 		case WM_DESTROY:
+			if (m_edgeHoverTimer != 0)
+			{
+				KillTimer(hwnd, m_edgeHoverTimer);
+				m_edgeHoverTimer = 0;
+			}
 			PostQuitMessage(0);
 			return 0;
 
@@ -342,5 +255,377 @@ namespace YuMediaPlayer
 
 		return DefWindowProc(hwnd, msg, wParam, lParam);
 	}
-	
+
+	void MainWindow::CheckAutoCollapse()
+	{
+		if (m_isCollapsed || m_isMoving)
+			return;
+		POINT pt;
+		if (!GetCursorPos(&pt))
+			return;
+
+		RECT wr;
+		GetWindowRect(m_hwnd, &wr);
+
+		if (PtInRect(&wr, pt))
+			return;
+
+		// 鼠标刚离开窗口时给一点缓冲，避免移动到窗口外一个像素就瞬间缩回。
+		// 这个延迟也让体验更接近播放器悬浮窗。
+		constexpr DWORD COLLAPSE_DELAY_MS = 120;
+		DWORD now = GetTickCount();
+
+		if (m_lastMouseMoveTick != 0 &&
+			static_cast<DWORD>(now - m_lastMouseMoveTick) < COLLAPSE_DELAY_MS)
+			return;
+
+		CheckAndCollapseAtEdge();
+	}
+
+	void MainWindow::CheckCollapsedMouseHover()
+	{
+		if (!m_isCollapsed || m_isMoving)
+			return;
+
+		POINT pt;
+		if (!GetCursorPos(&pt))
+			return;
+
+		RECT wr;
+		GetWindowRect(m_hwnd, &wr);
+
+		HMONITOR hMon = MonitorFromWindow(
+			m_hwnd,
+			MONITOR_DEFAULTTONEAREST);
+
+		MONITORINFO mi = { sizeof(mi) };
+		if (!GetMonitorInfo(hMon, &mi))
+			return;
+
+		// 收起后，鼠标靠近当前隐藏的屏幕边缘即可恢复。
+		// 对右侧尤其重要：即使透明区域没有 WM_MOUSEMOVE，也能恢复。
+		constexpr int HOVER_THRESHOLD = 18;
+
+		bool shouldRestore = false;
+
+		switch (m_collapsedEdge)
+		{
+		case CollapseEdge::Left:
+			shouldRestore =
+				pt.x <= mi.rcWork.left + HOVER_THRESHOLD &&
+				pt.y >= wr.top &&
+				pt.y <= wr.bottom;
+			break;
+
+		case CollapseEdge::Right:
+			shouldRestore =
+				pt.x >= mi.rcWork.right - HOVER_THRESHOLD &&
+				pt.y >= wr.top &&
+				pt.y <= wr.bottom;
+			break;
+
+		case CollapseEdge::Top:
+			shouldRestore =
+				pt.y <= mi.rcWork.top + HOVER_THRESHOLD &&
+				pt.x >= wr.left &&
+				pt.x <= wr.right;
+			break;
+
+		case CollapseEdge::Bottom:
+			shouldRestore =
+				pt.y >= mi.rcWork.bottom - HOVER_THRESHOLD &&
+				pt.x >= wr.left &&
+				pt.x <= wr.right;
+			break;
+
+		default:
+			break;
+		}
+
+		if (shouldRestore)
+			RestoreWindow();
+	}
+
+	void MainWindow::CheckAndCollapseAtEdge()
+	{
+		if (m_isCollapsed)
+			return;
+
+		RECT wr;
+		GetWindowRect(m_hwnd, &wr);
+		CollapseAtEdgeRect(wr);
+	}
+
+	void MainWindow::CollapseAtEdgeRect(const RECT& wr)
+	{
+		if (m_isCollapsed)
+			return;
+
+		HMONITOR hMon = MonitorFromRect(&wr, MONITOR_DEFAULTTONEAREST);
+		MONITORINFO mi = { sizeof(mi) };
+		GetMonitorInfo(hMon, &mi);
+
+		const int EDGE_THRESHOLD = 5;
+		const int COLLAPSED_SIZE = 94;
+		const int AVATAR_RIGHT = 92; // avatarRect: x=8, width=84 -> right=92
+		const int RIGHT_REVEAL = 14; // 右侧收起只露出头像最右侧 14px
+
+		const int windowWidth = wr.right - wr.left;
+		const int windowHeight = wr.bottom - wr.top;
+		const bool nearLeft = wr.left <= mi.rcWork.left + EDGE_THRESHOLD;
+		const bool nearRight = wr.right >= mi.rcWork.right - EDGE_THRESHOLD;
+		const bool nearTop = wr.top <= mi.rcWork.top + EDGE_THRESHOLD;
+		const bool nearBottom = wr.bottom >= mi.rcWork.bottom - EDGE_THRESHOLD;
+
+		if (!nearLeft && !nearRight && !nearTop && !nearBottom)
+			return;
+
+		m_savedWindowWidth = windowWidth;
+		m_savedWindowHeight = windowHeight;
+		m_savedWindowX = wr.left;
+		m_savedWindowY = wr.top;
+
+		int newX = wr.left;
+		int newY = wr.top;
+		int newWidth = COLLAPSED_SIZE;
+		int newHeight = COLLAPSED_SIZE;
+
+		// 左/上/下：保持原来的 94x94 收起方式。
+		// 右侧：保持原窗口尺寸，只把窗口向右藏到屏幕外，露出 84px 圆形头像。
+		if (nearLeft)
+		{
+			m_collapsedEdge = CollapseEdge::Left;
+			newX = mi.rcWork.left;
+			newY = wr.top;
+		}
+		else if (nearRight)
+		{
+			m_collapsedEdge = CollapseEdge::Right;
+			newX = mi.rcWork.right - RIGHT_REVEAL - AVATAR_RIGHT;
+			newY = wr.top;
+			newWidth = windowWidth;
+			newHeight = windowHeight;
+		}
+		else if (nearTop)
+		{
+			m_collapsedEdge = CollapseEdge::Top;
+			newX = wr.left;
+			newY = mi.rcWork.top;
+		}
+		else if (nearBottom)
+		{
+			m_collapsedEdge = CollapseEdge::Bottom;
+			newX = wr.left;
+			newY = mi.rcWork.bottom - COLLAPSED_SIZE;
+		}
+
+		m_isCollapsed = true;
+
+		SetWindowPos(
+			m_hwnd,
+			nullptr,
+			newX, newY, newWidth, newHeight,
+			SWP_NOZORDER | SWP_NOACTIVATE);
+
+		// 结束系统当前的拖动，否则系统可能紧接着下一条 WM_MOVING 把收起后的窗口又拖走。
+		ReleaseCapture();
+
+		Composite();
+	}
+
+	bool MainWindow::EnsureLayeredBitmap(int width, int height)
+	{
+		// 如果已有合适大小的位图，直接复用
+		if (m_dibSection && m_bitmapW == width && m_bitmapH == height)
+			return true;
+
+		// 释放旧位图
+		if (m_dibSection)
+		{
+			DeleteObject(m_dibSection);
+			m_dibSection = nullptr;
+			m_dibBits = nullptr;
+		}
+
+		// 创建 32bpp DIB (Device Independent Bitmap)
+		BITMAPINFOHEADER bih = {};
+		bih.biSize = sizeof(BITMAPINFOHEADER);
+		bih.biWidth = width;
+		bih.biHeight = -height;  // 负数表示从上到下，而不是从下到上
+		bih.biPlanes = 1;
+		bih.biBitCount = 32;
+		bih.biCompression = BI_RGB;
+
+		HDC hScreenDC = GetDC(nullptr);
+		m_dibSection = CreateDIBSection(hScreenDC, (BITMAPINFO*)&bih, DIB_RGB_COLORS, &m_dibBits, nullptr, 0);
+		ReleaseDC(nullptr, hScreenDC);
+
+		if (!m_dibSection)
+			return false;
+
+		m_bitmapW = width;
+		m_bitmapH = height;
+		return true;
+	}
+
+	void MainWindow::Composite()
+	{
+		// SetWindowPos 会同步触发 WM_SIZE，而 WM_SIZE 又会调用 Composite。
+		// 如果这里发生重入，内层 Composite 可能释放正在被外层 GDI+ Bitmap 使用的 DIB，
+		// 最终导致 0xC0000374（堆已损坏）。直接禁止重入。
+		if (m_isCompositing)
+			return;
+
+		m_isCompositing = true;
+
+		struct CompositeGuard
+		{
+			bool& flag;
+			~CompositeGuard() { flag = false; }
+		} guard{ m_isCompositing };
+
+		RECT wr;
+		GetWindowRect(m_hwnd, &wr);
+		int w = wr.right - wr.left;
+		int h = wr.bottom - wr.top;
+
+		if (w <= 0 || h <= 0)
+			return;
+
+		if (!EnsureLayeredBitmap(w, h))
+			return;
+
+		// 使用 GDI+ 在位图上绘制
+		{
+			Gdiplus::Bitmap bitmap(w, h, w * 4, 0xE200B, (BYTE*)m_dibBits);
+			Gdiplus::Graphics g(&bitmap);
+			g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+			g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+			g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+
+			// 清空为全透明
+			g.Clear(Gdiplus::Color(0, 0, 0, 0));
+
+			if (m_isCollapsed)
+			{
+				// 所有收起状态都只绘制头像。
+				// 右侧虽然窗口仍保持原尺寸，但其余区域完全透明，
+				// 因此视觉上只有圆形头像露在屏幕边缘。
+				Gdiplus::RectF avatarRect(8.0f, 0.0f, 84.0f, 84.0f);
+				m_avatarRectF = avatarRect;
+				m_avatar.Draw(g, avatarRect);
+			}
+			else
+			{
+				// 正常状态：绘制背景卡片。
+				Gdiplus::RectF cardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
+				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
+
+				Gdiplus::GraphicsPath path;
+				float radius = 12.0f;
+				float d = radius * 2.0f;
+				path.AddArc(cardRect.X, cardRect.Y, d, d, 180.0f, 90.0f);
+				path.AddArc(cardRect.GetRight() - d, cardRect.Y, d, d, 270.0f, 90.0f);
+				path.AddArc(cardRect.GetRight() - d, cardRect.GetBottom() - d, d, d, 0.0f, 90.0f);
+				path.AddArc(cardRect.X, cardRect.GetBottom() - d, d, d, 90.0f, 90.0f);
+				path.CloseFigure();
+				g.FillPath(&cardBrush, &path);
+
+				// 绘制圆形头像和进度环。
+				Gdiplus::RectF avatarRect(8.0f, 0.0f, 84.0f, 84.0f);
+				m_avatarRectF = avatarRect;
+				m_avatar.Draw(g, avatarRect);
+
+				// 绘制歌曲信息。
+				Gdiplus::RectF textCardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
+				DrawTrackInfoGdiplus(g, textCardRect, avatarRect);
+			}
+		}
+
+		// 使用 UpdateLayeredWindow 推送位图到系统
+		{
+			HDC hScreenDC = GetDC(nullptr);
+			HDC hMemDC = CreateCompatibleDC(hScreenDC);
+			HBITMAP hOldBitmap = (HBITMAP)SelectObject(hMemDC, m_dibSection);
+
+			POINT ptSrc = { 0, 0 };
+			SIZE szWindow = { w, h };
+
+			BLENDFUNCTION blend = {};
+			blend.BlendOp = AC_SRC_OVER;
+			blend.BlendFlags = 0;
+			blend.AlphaFormat = AC_SRC_ALPHA;
+			blend.SourceConstantAlpha = 255;
+
+			UpdateLayeredWindow(m_hwnd, hScreenDC, nullptr, &szWindow, hMemDC, &ptSrc, 0, &blend, ULW_ALPHA);
+
+			SelectObject(hMemDC, hOldBitmap);
+			DeleteDC(hMemDC);
+			ReleaseDC(nullptr, hScreenDC);
+		}
+	}
+
+	void MainWindow::DrawTrackInfoGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& cardRect, const Gdiplus::RectF& avatarRect)
+	{
+		// 在卡片右侧、头像旁边绘制歌名和歌手信息
+		if (m_trackTitle.empty() && m_trackArtist.empty())
+			return;
+
+		float textX = avatarRect.GetRight() + 15.0f;
+		float textWidth = cardRect.GetRight() - textX - 10.0f;
+		float cardCenterY = cardRect.Y + (cardRect.Height / 2.0f);
+
+		if (textWidth <= 0)
+			return;
+
+		Gdiplus::StringFormat stringFormat;
+		stringFormat.SetAlignment(Gdiplus::StringAlignmentNear);
+		stringFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+		stringFormat.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+
+		Gdiplus::Font titleFont(L"Microsoft YaHei UI", 11.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+		Gdiplus::Font artistFont(L"Microsoft YaHei UI", 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+		Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 255, 255));
+		Gdiplus::SolidBrush artistBrush(Gdiplus::Color(200, 200, 200));
+
+		bool hasBoth = !m_trackTitle.empty() && !m_trackArtist.empty();
+		if (hasBoth)
+		{
+			float titleH = titleFont.GetHeight(&g);
+			float artistH = artistFont.GetHeight(&g);
+			float totalH = titleH + artistH - 2.0f;
+			float startY = cardCenterY - totalH / 2.0f;
+
+			g.DrawString(m_trackTitle.c_str(), -1, &titleFont,
+				Gdiplus::PointF(textX, startY), &titleBrush);
+			g.DrawString(m_trackArtist.c_str(), -1, &artistFont,
+				Gdiplus::PointF(textX, startY + titleH - 2.0f), &artistBrush);
+		}
+		else
+		{
+			const std::wstring& single = m_trackTitle.empty() ? m_trackArtist : m_trackTitle;
+			Gdiplus::Font& font = m_trackTitle.empty() ? artistFont : titleFont;
+			Gdiplus::SolidBrush& brush = m_trackTitle.empty() ? artistBrush : titleBrush;
+
+			float h = font.GetHeight(&g);
+			float startY = cardCenterY - h / 2.0f;
+			g.DrawString(single.c_str(), -1, &font, Gdiplus::PointF(textX, startY), &brush);
+		}
+	}
+
+	void MainWindow::RestoreWindow()
+	{
+		if (!m_isCollapsed)
+			return;
+
+		m_isCollapsed = false;
+		m_collapsedEdge = CollapseEdge::None;
+
+		// 恢复到之前保存的大小和位置
+		SetWindowPos(m_hwnd, nullptr, m_savedWindowX, m_savedWindowY,
+			m_savedWindowWidth, m_savedWindowHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+		// 关键：分层窗口改变尺寸后必须调用 Composite() 重新绘制
+		Composite();
+	}
+
 }
