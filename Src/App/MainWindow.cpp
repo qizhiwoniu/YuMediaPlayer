@@ -39,6 +39,63 @@ namespace YuMediaPlayer
 		return true; 
 	}
 
+	bool MainWindow::InitWindow(const wchar_t* title, int width, int height)
+	{
+		// 1. 注册窗口类
+		static const wchar_t CLASS_NAME[] = L"YuMediaPlayerWindowClass";
+		static bool classRegistered = false;
+		
+		if (!classRegistered)
+		{
+			WNDCLASSEX wc = {};
+			wc.cbSize = sizeof(WNDCLASSEX);
+			wc.style = CS_HREDRAW | CS_VREDRAW;
+			wc.lpfnWndProc = WndProc;
+			wc.cbClsExtra = 0;
+			wc.cbWndExtra = 0;
+			wc.hInstance = GetModuleHandle(nullptr);
+			wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+			wc.hbrBackground = nullptr;
+			wc.lpszClassName = CLASS_NAME;
+			
+			if (!RegisterClassEx(&wc))
+				return false;
+			
+			classRegistered = true;
+		}
+
+		// 2. 创建分层窗口 - WS_EX_LAYERED 是关键！
+		m_hwnd = CreateWindowEx(
+			WS_EX_LAYERED | WS_EX_TOPMOST,  // 分层窗口 + 总在最前
+			CLASS_NAME,
+			title,
+			WS_POPUP,  // 弹出式窗口，无标题栏
+			100, 100,  // 初始位置 (x, y)
+			width, height,
+			nullptr,   // 父窗口
+			nullptr,   // 菜单
+			GetModuleHandle(nullptr),
+			this       // 传入 this 指针
+		);
+
+		if (!m_hwnd)
+			return false;
+
+		// 3. 绑定 this 指针到窗口用户数据
+		SetWindowLongPtr(m_hwnd, GWLP_USERDATA, (LONG_PTR)this);
+
+		// 4. 显示窗口
+		ShowWindow(m_hwnd, SW_SHOW);
+		UpdateWindow(m_hwnd);
+
+		// 5. 设置定时器用于边缘吸附检测和自动收起
+		m_edgeHoverTimer = SetTimer(m_hwnd, 1001, 100, nullptr);
+		if (m_edgeHoverTimer == 0)
+			return false;
+
+		return true;
+	}
+
 	void MainWindow::Run()
 	{
 		MSG msg = {};
@@ -62,14 +119,34 @@ namespace YuMediaPlayer
 				}
 				else
 				{
-					WaitMessage(); // 
+					WaitMessage();
 				}
 			}
 		}
 
 	}
 
-	
+	LRESULT CALLBACK MainWindow::WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+	{
+		MainWindow* pThis = nullptr;
+
+		if (msg == WM_CREATE)
+		{
+			CREATESTRUCT* pCreate = reinterpret_cast<CREATESTRUCT*>(lParam);
+			pThis = reinterpret_cast<MainWindow*>(pCreate->lpCreateParams);
+			SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)pThis);
+		}
+		else
+		{
+			pThis = reinterpret_cast<MainWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
+		}
+
+		if (pThis)
+			return pThis->EventProc(hwnd, msg, wParam, lParam);
+		else
+			return DefWindowProc(hwnd, msg, wParam, lParam);
+	}
+
 	LRESULT MainWindow::EventProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
 		switch (msg)
@@ -86,7 +163,36 @@ namespace YuMediaPlayer
 		case WM_EXITSIZEMOVE:
 		{
 			m_isMoving = false;
-			if (!m_isCollapsed)
+
+			// 收缩状态下，用户可能手动把"小圆"沿边缘拖到了别的位置（比如拖到右下角）。
+			// 这里把拖动后的最新位置同步回 m_savedWindowX/Y，
+			// 否则展开时会用收缩前记录的旧位置，导致"跳回"原来的地方。
+			if (m_isCollapsed && !m_isAnimating)
+			{
+				RECT wr;
+				GetWindowRect(hwnd, &wr);
+
+				switch (m_collapsedEdge)
+				{
+				case CollapseEdge::Right:
+				case CollapseEdge::Left:
+					// 左右两侧收起时，收起态的窗口左右位置是贴边固定的，
+					// 拖动主要改变的是垂直位置，所以同步 Y。
+					m_savedWindowY = wr.top;
+					break;
+				case CollapseEdge::Top:
+				case CollapseEdge::Bottom:
+					// 上下两侧收起时，同理同步 X。
+					m_savedWindowX = wr.left;
+					break;
+				default:
+					break;
+				}
+			}
+
+			// 只在未收缩且未动画时才检查边缘吸附
+			// 已收缩状态下只让鼠标悬停检测处理展开逻辑
+			if (!m_isCollapsed && !m_isAnimating)
 				CheckAndCollapseAtEdge();
 			return 0;
 		}
@@ -94,11 +200,17 @@ namespace YuMediaPlayer
 		{
 			if (wParam == 1001)
 			{
-				if (m_isCollapsed)
+				if (m_isCollapsed && !m_isAnimating)
 					CheckCollapsedMouseHover();
-				else if (!m_isMoving)
+				else if (!m_isMoving && !m_isAnimating)
 					CheckAutoCollapse();
 
+				return 0;
+			}
+			else if (wParam == 2001)
+			{
+				// 动画定时器
+				UpdateCollapseAnimation();
 				return 0;
 			}
 			break;
@@ -143,7 +255,7 @@ namespace YuMediaPlayer
 			RECT rc;
 			GetClientRect(hwnd, &rc);
 
-			static HBRUSH s_darkBrush = CreateSolidBrush(RGB(24, 24, 24)); // blackground
+			static HBRUSH s_darkBrush = CreateSolidBrush(RGB(24, 24, 24)); // background
 			FillRect(hdc, &rc, s_darkBrush);
 
 			EndPaint(hwnd, &ps);
@@ -168,7 +280,14 @@ namespace YuMediaPlayer
 		{
 			if (m_isCollapsed)
 			{
-				RestoreWindow();
+				if (m_collapsedEdge == MainWindow::CollapseEdge::Right)
+				{
+					StartExpandAnimation();
+				}
+				else
+				{
+					RestoreWindow();
+				}
 				return 0;
 			}
 			return 0;
@@ -201,21 +320,20 @@ namespace YuMediaPlayer
 			bool middleTop = !left && !right && top;
 			bool middleBottom = !left && !right && bottom;
 			bool center = pt.x >= wr.left + (wr.right - wr.left) / 2 && pt.y >= wr.top + (wr.bottom - wr.top) / 2;
-			// 角
+			
+			// 角落
 			if (top && left)     return HTTOPLEFT;
 			if (top && right)    return HTTOPRIGHT;
 			if (bottom && left)  return HTBOTTOMLEFT;
 			if (bottom && right) return HTBOTTOMRIGHT;
 
-			// bian
+			// 边缘
 			if (left)   return HTLEFT;
 			if (right)  return HTRIGHT;
 			if (top)    return HTTOP;
 			if (bottom) return HTBOTTOM;
-			/*if (pt.y >= wr.top && pt.y < wr.top + 30)
-			{
-				return HTCAPTION;
-			}*/
+			
+			// 标题栏（用于拖动） - 卡片顶部区域
 			if (pt.y >= wr.bottom - 70 && pt.y < wr.bottom)
 			{
 				return HTCAPTION;
@@ -231,7 +349,6 @@ namespace YuMediaPlayer
 
 			MINMAXINFO* mmi = (MINMAXINFO*)lParam;
 
-			//  
 			mmi->ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
 			mmi->ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top;
 
@@ -246,6 +363,11 @@ namespace YuMediaPlayer
 				KillTimer(hwnd, m_edgeHoverTimer);
 				m_edgeHoverTimer = 0;
 			}
+			if (m_animationTimer != 0)
+			{
+				KillTimer(hwnd, m_animationTimer);
+				m_animationTimer = 0;
+			}
 			PostQuitMessage(0);
 			return 0;
 
@@ -256,9 +378,173 @@ namespace YuMediaPlayer
 		return DefWindowProc(hwnd, msg, wParam, lParam);
 	}
 
+	void MainWindow::StartCollapseAnimation()
+	{
+		if (m_isAnimating || m_isCollapsed)
+			return;
+
+		m_isAnimating = true;
+		m_animationIsCollapsing = true;
+		m_animationProgress = 0.0f;
+
+		RECT wr;
+		GetWindowRect(m_hwnd, &wr);
+		m_animationStartWidth = wr.right - wr.left;
+
+		// 右侧收起的目标宽度（保留卡片的最小宽度 + 头像）
+		// 卡片从 10px 开始，头像在 8px，宽度 84px，所以右边卡片边框到头像右边是 92px
+		// 保留一点卡片的宽度，比如 110px 可以露出头像和一点背景框
+		const int COLLAPSED_WIDTH = 110;
+		m_animationTargetWidth = COLLAPSED_WIDTH;
+
+		// 启动动画定时器 (16ms ≈ 60fps)
+		m_animationTimer = SetTimer(m_hwnd, 2001, 16, nullptr);
+	}
+
+	void MainWindow::StartExpandAnimation()
+	{
+		if (m_isAnimating || !m_isCollapsed)
+			return;
+
+		m_isAnimating = true;
+		m_animationIsCollapsing = false;
+		m_animationProgress = 0.0f;
+
+		RECT wr;
+		GetWindowRect(m_hwnd, &wr);
+		m_animationStartWidth = wr.right - wr.left;
+		m_animationTargetWidth = m_savedWindowWidth;
+
+		// 启动动画定时器
+		m_animationTimer = SetTimer(m_hwnd, 2001, 16, nullptr);
+	}
+
+	void MainWindow::UpdateCollapseAnimation()
+	{
+		if (!m_isAnimating)
+			return;
+
+		// 动画时长：300ms
+		constexpr float ANIMATION_DURATION_MS = 300.0f;
+		constexpr float FRAME_TIME_MS = 16.0f;
+
+		m_animationProgress += FRAME_TIME_MS / ANIMATION_DURATION_MS;
+
+		if (m_animationProgress >= 1.0f)
+		{
+			m_animationProgress = 1.0f;
+			m_isAnimating = false;
+
+			// 动画完成
+			if (m_animationTimer != 0)
+			{
+				KillTimer(m_hwnd, m_animationTimer);
+				m_animationTimer = 0;
+			}
+
+			if (m_animationIsCollapsing)
+			{
+				// 收起动画完成
+				m_isCollapsed = true;
+				
+				// 计算最终位置：头像右边缘（92px）停在屏幕右边缘
+				HMONITOR hMon = MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST);
+				MONITORINFO mi = { sizeof(mi) };
+				GetMonitorInfo(hMon, &mi);
+
+				// 头像：x=8, width=84, 右边缘=92
+				// 我们让头像右边缘停在屏幕右边缘减去一点距离（比如10px）
+				int finalX = mi.rcWork.right - 92 - 10;
+				
+				SetWindowPos(
+					m_hwnd, nullptr,
+					finalX, m_savedWindowY,
+					m_animationTargetWidth, m_savedWindowHeight,
+					SWP_NOZORDER | SWP_NOACTIVATE);
+			}
+			else
+			{
+				// 展开动画完成
+				m_isCollapsed = false;
+				SetWindowPos(
+					m_hwnd, nullptr,
+					m_savedWindowX, m_savedWindowY,
+					m_savedWindowWidth, m_savedWindowHeight,
+					SWP_NOZORDER | SWP_NOACTIVATE);
+			}
+
+			Composite();
+			return;
+		}
+
+		// 缓动函数（平方缓出）
+		float easeProgress = m_animationProgress * m_animationProgress;
+
+		RECT wr;
+		GetWindowRect(m_hwnd, &wr);
+
+		if (m_animationIsCollapsing)
+		{
+			// 收起动画：向右收缩
+			// 计算当前窗口宽度
+			int currentWidth = m_animationStartWidth + 
+				(int)((m_animationTargetWidth - m_animationStartWidth) * easeProgress);
+
+			// 获取屏幕信息
+			HMONITOR hMon = MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST);
+			MONITORINFO mi = { sizeof(mi) };
+			GetMonitorInfo(hMon, &mi);
+
+			// 计算目标X位置：头像右边缘（92px）停在屏幕右边缘减去一点距离
+			int targetX = mi.rcWork.right - 92 - 10;
+			
+			// 线性插值当前X位置
+			int currentX = m_savedWindowX + (int)((targetX - m_savedWindowX) * easeProgress);
+
+			SetWindowPos(
+				m_hwnd, nullptr,
+				currentX, wr.top,
+				currentWidth, wr.bottom - wr.top,
+				SWP_NOZORDER | SWP_NOACTIVATE);
+		}
+		else
+		{
+			// 展开动画：从右到左平滑展开
+			// 窗口宽度从当前宽度增长到原始宽度
+			int currentWidth = m_animationStartWidth + 
+				(int)((m_animationTargetWidth - m_animationStartWidth) * easeProgress);
+
+			// 获取屏幕信息
+			HMONITOR hMon = MonitorFromWindow(m_hwnd, MONITOR_DEFAULTTONEAREST);
+			MONITORINFO mi = { sizeof(mi) };
+			GetMonitorInfo(hMon, &mi);
+
+			// 头像始终停在屏幕右边缘
+			// 当前X = 屏幕右边缘 - 头像右边缘 - 当前宽度中卡片的部分
+			// 为了让窗口从右向左展开，X应该向左移动
+			int collapsedX = mi.rcWork.right - 92 - 10;
+			
+			// 计算展开时的X位置：从收起位置逐渐向左展开到原始位置
+			int currentX = collapsedX - (int)((currentWidth - m_animationStartWidth) * 0.5f);
+			
+			// 更准确的计算：保持卡片右边界向左移动
+			// 原始X位置是 m_savedWindowX
+			// 当前应该逐渐从 collapsedX 移动到 m_savedWindowX
+			currentX = collapsedX + (int)((m_savedWindowX - collapsedX) * easeProgress);
+
+			SetWindowPos(
+				m_hwnd, nullptr,
+				currentX, wr.top,
+				currentWidth, wr.bottom - wr.top,
+				SWP_NOZORDER | SWP_NOACTIVATE);
+		}
+
+		Composite();
+	}
+
 	void MainWindow::CheckAutoCollapse()
 	{
-		if (m_isCollapsed || m_isMoving)
+		if (m_isCollapsed || m_isMoving || m_isAnimating)
 			return;
 		POINT pt;
 		if (!GetCursorPos(&pt))
@@ -343,7 +629,16 @@ namespace YuMediaPlayer
 		}
 
 		if (shouldRestore)
-			RestoreWindow();
+		{
+			if (m_collapsedEdge == CollapseEdge::Right)
+			{
+				StartExpandAnimation();
+			}
+			else
+			{
+				RestoreWindow();
+			}
+		}
 	}
 
 	void MainWindow::CheckAndCollapseAtEdge()
@@ -358,7 +653,7 @@ namespace YuMediaPlayer
 
 	void MainWindow::CollapseAtEdgeRect(const RECT& wr)
 	{
-		if (m_isCollapsed)
+		if (m_isCollapsed || m_isAnimating)
 			return;
 
 		HMONITOR hMon = MonitorFromRect(&wr, MONITOR_DEFAULTTONEAREST);
@@ -385,52 +680,52 @@ namespace YuMediaPlayer
 		m_savedWindowX = wr.left;
 		m_savedWindowY = wr.top;
 
-		int newX = wr.left;
-		int newY = wr.top;
-		int newWidth = COLLAPSED_SIZE;
-		int newHeight = COLLAPSED_SIZE;
-
-		// 左/上/下：保持原来的 94x94 收起方式。
-		// 右侧：保持原窗口尺寸，只把窗口向右藏到屏幕外，露出 84px 圆形头像。
-		if (nearLeft)
-		{
-			m_collapsedEdge = CollapseEdge::Left;
-			newX = mi.rcWork.left;
-			newY = wr.top;
-		}
-		else if (nearRight)
+		// 只在右侧使用动画收起，其他方向使用原来的快速收起
+		if (nearRight)
 		{
 			m_collapsedEdge = CollapseEdge::Right;
-			newX = mi.rcWork.right - RIGHT_REVEAL - AVATAR_RIGHT;
-			newY = wr.top;
-			newWidth = windowWidth;
-			newHeight = windowHeight;
+			// 启动向右收起的动画
+			ReleaseCapture();
+			StartCollapseAnimation();
 		}
-		else if (nearTop)
+		else
 		{
-			m_collapsedEdge = CollapseEdge::Top;
-			newX = wr.left;
-			newY = mi.rcWork.top;
+			// 其他边缘快速收起（不用动画）
+			int newX = wr.left;
+			int newY = wr.top;
+			int newWidth = COLLAPSED_SIZE;
+			int newHeight = COLLAPSED_SIZE;
+
+			if (nearLeft)
+			{
+				m_collapsedEdge = CollapseEdge::Left;
+				newX = mi.rcWork.left;
+				newY = wr.top;
+			}
+			else if (nearTop)
+			{
+				m_collapsedEdge = CollapseEdge::Top;
+				newX = wr.left;
+				newY = mi.rcWork.top;
+			}
+			else if (nearBottom)
+			{
+				m_collapsedEdge = CollapseEdge::Bottom;
+				newX = wr.left;
+				newY = mi.rcWork.bottom - COLLAPSED_SIZE;
+			}
+
+			m_isCollapsed = true;
+
+			SetWindowPos(
+				m_hwnd,
+				nullptr,
+				newX, newY, newWidth, newHeight,
+				SWP_NOZORDER | SWP_NOACTIVATE);
+
+			ReleaseCapture();
+			Composite();
 		}
-		else if (nearBottom)
-		{
-			m_collapsedEdge = CollapseEdge::Bottom;
-			newX = wr.left;
-			newY = mi.rcWork.bottom - COLLAPSED_SIZE;
-		}
-
-		m_isCollapsed = true;
-
-		SetWindowPos(
-			m_hwnd,
-			nullptr,
-			newX, newY, newWidth, newHeight,
-			SWP_NOZORDER | SWP_NOACTIVATE);
-
-		// 结束系统当前的拖动，否则系统可能紧接着下一条 WM_MOVING 把收起后的窗口又拖走。
-		ReleaseCapture();
-
-		Composite();
 	}
 
 	bool MainWindow::EnsureLayeredBitmap(int width, int height)
@@ -506,14 +801,180 @@ namespace YuMediaPlayer
 			// 清空为全透明
 			g.Clear(Gdiplus::Color(0, 0, 0, 0));
 
-			if (m_isCollapsed)
+			if (m_isCollapsed && !m_isAnimating)
 			{
-				// 所有收起状态都只绘制头像。
-				// 右侧虽然窗口仍保持原尺寸，但其余区域完全透明，
-				// 因此视觉上只有圆形头像露在屏幕边缘。
+				// 收起状态下也保留背景卡片，不再完全透明消失——
+				// 只是卡片和窗口本身都已经缩小到只够包住头像的尺寸。
+				Gdiplus::RectF cardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
+				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
+
+				Gdiplus::GraphicsPath path;
+				float radius = 12.0f;
+				float d = radius * 2.0f;
+				path.AddArc(cardRect.X, cardRect.Y, d, d, 180.0f, 90.0f);
+				path.AddArc(cardRect.GetRight() - d, cardRect.Y, d, d, 270.0f, 90.0f);
+				path.AddArc(cardRect.GetRight() - d, cardRect.GetBottom() - d, d, d, 0.0f, 90.0f);
+				path.AddArc(cardRect.X, cardRect.GetBottom() - d, d, d, 90.0f, 90.0f);
+				path.CloseFigure();
+				g.FillPath(&cardBrush, &path);
+
+				// 头像仍然画在同样的位置（露出卡片顶部）
 				Gdiplus::RectF avatarRect(8.0f, 0.0f, 84.0f, 84.0f);
 				m_avatarRectF = avatarRect;
 				m_avatar.Draw(g, avatarRect);
+			}
+			else if (m_isAnimating && m_animationIsCollapsing)
+			{
+				// 收起动画：背景卡片向右收缩，但保持可见
+				// 文字逐渐透明消失，头像始终可见
+
+				// 绘制背景卡片（保持完全不透明，但宽度递减）
+				Gdiplus::RectF cardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
+				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
+
+				Gdiplus::GraphicsPath path;
+				float radius = 12.0f;
+				float d = radius * 2.0f;
+				path.AddArc(cardRect.X, cardRect.Y, d, d, 180.0f, 90.0f);
+				path.AddArc(cardRect.GetRight() - d, cardRect.Y, d, d, 270.0f, 90.0f);
+				path.AddArc(cardRect.GetRight() - d, cardRect.GetBottom() - d, d, d, 0.0f, 90.0f);
+				path.AddArc(cardRect.X, cardRect.GetBottom() - d, d, d, 90.0f, 90.0f);
+				path.CloseFigure();
+				g.FillPath(&cardBrush, &path);
+
+				// 绘制头像（始终可见）
+				// X 从 8 改为 18：向右移动 10px，让卡片左边露出一点在头像左侧。
+				Gdiplus::RectF avatarRect(18.0f, 0.0f, 84.0f, 84.0f);
+				m_avatarRectF = avatarRect;
+				m_avatar.Draw(g, avatarRect);
+
+				// 绘制歌曲信息（逐渐透明消失）
+				float textAlphaProgress = m_animationProgress;  // 文字随着动画进度逐渐消失
+				
+				if (!m_trackTitle.empty() || !m_trackArtist.empty())
+				{
+					float textX = avatarRect.GetRight() + 15.0f;
+					float textWidth = cardRect.GetRight() - textX - 10.0f;
+					float cardCenterY = cardRect.Y + (cardRect.Height / 2.0f);
+
+					if (textWidth > 0)
+					{
+						Gdiplus::StringFormat stringFormat;
+						stringFormat.SetAlignment(Gdiplus::StringAlignmentNear);
+						stringFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+						stringFormat.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+
+						Gdiplus::Font titleFont(L"Microsoft YaHei UI", 11.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+						Gdiplus::Font artistFont(L"Microsoft YaHei UI", 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+						
+						// 文字逐渐消失（透明度递增）
+						int titleAlpha = (int)(255.0f * (1.0f - textAlphaProgress));
+						int artistAlpha = (int)(200.0f * (1.0f - textAlphaProgress));
+						
+						Gdiplus::SolidBrush titleBrush(Gdiplus::Color(titleAlpha, 255, 255, 255));
+						Gdiplus::SolidBrush artistBrush(Gdiplus::Color(artistAlpha, 200, 200, 200));
+
+						bool hasBoth = !m_trackTitle.empty() && !m_trackArtist.empty();
+						if (hasBoth)
+						{
+							float titleH = titleFont.GetHeight(&g);
+							float artistH = artistFont.GetHeight(&g);
+							float totalH = titleH + artistH - 2.0f;
+							float startY = cardCenterY - totalH / 2.0f;
+
+							g.DrawString(m_trackTitle.c_str(), -1, &titleFont,
+								Gdiplus::PointF(textX, startY), &titleBrush);
+							g.DrawString(m_trackArtist.c_str(), -1, &artistFont,
+								Gdiplus::PointF(textX, startY + titleH - 2.0f), &artistBrush);
+						}
+						else
+						{
+							const std::wstring& single = m_trackTitle.empty() ? m_trackArtist : m_trackTitle;
+							Gdiplus::Font& font = m_trackTitle.empty() ? artistFont : titleFont;
+							Gdiplus::SolidBrush& brush = m_trackTitle.empty() ? artistBrush : titleBrush;
+
+							float h = font.GetHeight(&g);
+							float startY = cardCenterY - h / 2.0f;
+							g.DrawString(single.c_str(), -1, &font, Gdiplus::PointF(textX, startY), &brush);
+						}
+					}
+				}
+			}
+			else if (m_isAnimating && !m_animationIsCollapsing)
+			{
+				// 展开动画：背景卡片保持可见，文字逐渐出现
+				
+				// 绘制背景卡片（始终可见，完全不透明）
+				Gdiplus::RectF cardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
+				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
+
+				Gdiplus::GraphicsPath path;
+				float radius = 12.0f;
+				float d = radius * 2.0f;
+				path.AddArc(cardRect.X, cardRect.Y, d, d, 180.0f, 90.0f);
+				path.AddArc(cardRect.GetRight() - d, cardRect.Y, d, d, 270.0f, 90.0f);
+				path.AddArc(cardRect.GetRight() - d, cardRect.GetBottom() - d, d, d, 0.0f, 90.0f);
+				path.AddArc(cardRect.X, cardRect.GetBottom() - d, d, d, 90.0f, 90.0f);
+				path.CloseFigure();
+				g.FillPath(&cardBrush, &path);
+
+				// 绘制头像（始终可见）
+				// X 从 8 改为 18：向右移动 10px，让卡片左边露出一点在头像左侧。
+				Gdiplus::RectF avatarRect(18.0f, 0.0f, 84.0f, 84.0f);
+				m_avatarRectF = avatarRect;
+				m_avatar.Draw(g, avatarRect);
+
+				// 绘制歌曲信息（逐渐显示）
+				float textAlphaProgress = m_animationProgress;
+				
+				if (!m_trackTitle.empty() || !m_trackArtist.empty())
+				{
+					float textX = avatarRect.GetRight() + 15.0f;
+					float textWidth = cardRect.GetRight() - textX - 10.0f;
+					float cardCenterY = cardRect.Y + (cardRect.Height / 2.0f);
+
+					if (textWidth > 0)
+					{
+						Gdiplus::StringFormat stringFormat;
+						stringFormat.SetAlignment(Gdiplus::StringAlignmentNear);
+						stringFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+						stringFormat.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+
+						Gdiplus::Font titleFont(L"Microsoft YaHei UI", 11.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+						Gdiplus::Font artistFont(L"Microsoft YaHei UI", 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+						
+						// 文字逐渐显示（透明度递增）
+						int titleAlpha = (int)(255.0f * textAlphaProgress);
+						int artistAlpha = (int)(200.0f * textAlphaProgress);
+						
+						Gdiplus::SolidBrush titleBrush(Gdiplus::Color(titleAlpha, 255, 255, 255));
+						Gdiplus::SolidBrush artistBrush(Gdiplus::Color(artistAlpha, 200, 200, 200));
+
+						bool hasBoth = !m_trackTitle.empty() && !m_trackArtist.empty();
+						if (hasBoth)
+						{
+							float titleH = titleFont.GetHeight(&g);
+							float artistH = artistFont.GetHeight(&g);
+							float totalH = titleH + artistH - 2.0f;
+							float startY = cardCenterY - totalH / 2.0f;
+
+							g.DrawString(m_trackTitle.c_str(), -1, &titleFont,
+								Gdiplus::PointF(textX, startY), &titleBrush);
+							g.DrawString(m_trackArtist.c_str(), -1, &artistFont,
+								Gdiplus::PointF(textX, startY + titleH - 2.0f), &artistBrush);
+						}
+						else
+						{
+							const std::wstring& single = m_trackTitle.empty() ? m_trackArtist : m_trackTitle;
+							Gdiplus::Font& font = m_trackTitle.empty() ? artistFont : titleFont;
+							Gdiplus::SolidBrush& brush = m_trackTitle.empty() ? artistBrush : titleBrush;
+
+							float h = font.GetHeight(&g);
+							float startY = cardCenterY - h / 2.0f;
+							g.DrawString(single.c_str(), -1, &font, Gdiplus::PointF(textX, startY), &brush);
+						}
+					}
+				}
 			}
 			else
 			{
@@ -532,7 +993,8 @@ namespace YuMediaPlayer
 				g.FillPath(&cardBrush, &path);
 
 				// 绘制圆形头像和进度环。
-				Gdiplus::RectF avatarRect(8.0f, 0.0f, 84.0f, 84.0f);
+				// X 从 8 改为 18：向右移动 10px，让卡片左边露出一点在头像左侧。
+				Gdiplus::RectF avatarRect(18.0f, 0.0f, 84.0f, 84.0f);
 				m_avatarRectF = avatarRect;
 				m_avatar.Draw(g, avatarRect);
 
@@ -615,16 +1077,47 @@ namespace YuMediaPlayer
 
 	void MainWindow::RestoreWindow()
 	{
-		if (!m_isCollapsed)
+		if (!m_isCollapsed || m_isAnimating)
 			return;
 
-		m_isCollapsed = false;
-		m_collapsedEdge = CollapseEdge::None;
+		// 如果是右侧收起，使用展开动画
+		if (m_collapsedEdge == CollapseEdge::Right)
+		{
+			StartExpandAnimation();
+		}
+		else
+		{
+			// 其他方向快速展开
+			m_isCollapsed = false;
+			m_collapsedEdge = CollapseEdge::None;
+			SetWindowPos(m_hwnd, nullptr, m_savedWindowX, m_savedWindowY,
+				m_savedWindowWidth, m_savedWindowHeight, SWP_NOZORDER | SWP_NOACTIVATE);
+			Composite();
+		}
+	}
 
-		// 恢复到之前保存的大小和位置
-		SetWindowPos(m_hwnd, nullptr, m_savedWindowX, m_savedWindowY,
-			m_savedWindowWidth, m_savedWindowHeight, SWP_NOZORDER | SWP_NOACTIVATE);
-		// 关键：分层窗口改变尺寸后必须调用 Composite() 重新绘制
+	void MainWindow::SetCoverImage(const std::wstring& path)
+	{
+		m_avatar.LoadImageFromFile(path);
+		Composite();
+	}
+
+	void MainWindow::SetPlayProgress(float progress01)
+	{
+		m_avatar.SetProgress(progress01);
+		Composite();
+	}
+
+	void MainWindow::SetAvatarSkin(const CircularAvatar::Skin& skin)
+	{
+		m_avatar.SetSkin(skin);
+		Composite();
+	}
+
+	void MainWindow::SetTrackInfo(const std::wstring& title, const std::wstring& artist)
+	{
+		m_trackTitle = title;
+		m_trackArtist = artist;
 		Composite();
 	}
 
