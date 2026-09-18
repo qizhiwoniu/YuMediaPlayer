@@ -29,8 +29,8 @@ namespace YuMediaPlayer
 		RECT rc;
 		GetClientRect(m_hwnd, &rc);
 
-		m_trayIcon.Create(m_hwnd);  
-		m_trayIcon.ShowBalloon(L"YuMediaPlayer starting", L"starting...");
+		//m_trayIcon.Create(m_hwnd);  
+		//m_trayIcon.ShowBalloon(L"YuMediaPlayer starting", L"starting...");
 
 		int clientW = rc.right - rc.left;
 		int clientH = rc.bottom - rc.top;

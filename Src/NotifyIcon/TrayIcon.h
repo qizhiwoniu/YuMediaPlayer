@@ -38,6 +38,13 @@ public:
 
     HWND GetHwnd() const { return m_hwnd; }
 
+    // DPI（系统缩放比例）变化时调用，会按新的小图标尺寸重新加载 icons/logo.ico。
+    // 注意：托盘用的这个隐藏窗口是 HWND_MESSAGE 消息专用窗口，不在屏幕上、
+    // 不关联具体显示器，系统不会给它发 WM_DPICHANGED；真正会收到这个消息的
+    // 是主窗口（MainWindow 那个可见的顶层窗口），所以要在主窗口处理
+    // WM_DPICHANGED 的地方调用一下 m_trayIcon.ReloadIconForDpi()。
+    void ReloadIconForDpi();
+
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
         WPARAM wParam, LPARAM lParam);
@@ -60,4 +67,9 @@ private:
     HICON   m_blinkIcon2;
     bool    m_blinkState;
     bool    m_blinking;
+
+    // ── 图标随 DPI 自适应 ──────────────────────────────────
+    std::wstring m_iconPath;     // 记住加载路径，DPI 变化时用同一张图重新按新尺寸加载
+    HICON        m_ownedIcon;    // 当前通过 LoadImage 从文件加载、由本类持有/负责销毁的图标句柄
+    HICON        LoadTrayIconFromFile(const std::wstring& path) const; // 按当前 DPI 对应的小图标尺寸加载
 };

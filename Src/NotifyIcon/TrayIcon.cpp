@@ -1,6 +1,11 @@
 #include "TrayIcon.h"
-#include <sstream>
+#include <windows.h>
+#include <shellapi.h>
+#include <wininet.h>
 #include <string>
+
+#pragma comment(lib, "wininet.lib")
+#pragma comment(lib, "shell32.lib")
 
     static TrayIcon* g_trayInstance = nullptr;
 
@@ -8,34 +13,51 @@
         : m_hInstance(hInstance)
         , m_hwnd(nullptr)
         , m_parentHwnd(nullptr)
+        , m_nid{}
         , m_tooltip(tooltip)
         , m_created(false)
         , m_blinkIcon1(nullptr)
         , m_blinkIcon2(nullptr)
         , m_blinkState(false)
         , m_blinking(false)
+        , m_iconPath()
+        , m_ownedIcon(nullptr)
     {
         g_trayInstance = this;
         ZeroMemory(&m_nid, sizeof(m_nid));
     }
 
     TrayIcon::~TrayIcon() {
+        // 先解除全局实例，防止窗口/定时器消息再次访问已经析构的对象。
+        if (g_trayInstance == this)
+            g_trayInstance = nullptr;
+
         StopBlink();
         Remove();
-        if (m_hwnd) DestroyWindow(m_hwnd);
+
+        if (m_ownedIcon) {
+            DestroyIcon(m_ownedIcon);
+            m_ownedIcon = nullptr;
+        }
+
+        if (m_hwnd) {
+            DestroyWindow(m_hwnd);
+            m_hwnd = nullptr;
+        }
     }
 
     bool TrayIcon::Create(HWND parentHwnd) {
         m_parentHwnd = parentHwnd;
         // 注册隐藏窗口类（用于接收托盘消息）
-        WNDCLASSEX wc = {};
+        WNDCLASSEXW wc = {};
         wc.cbSize = sizeof(wc);
         wc.lpfnWndProc = WndProc;
         wc.hInstance = m_hInstance;
         wc.lpszClassName = L"YuMediaPlayer_TrayClass";
-        RegisterClassEx(&wc);  // 已注册则忽略返回值
+        if (!RegisterClassExW(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+        return false;
 
-        m_hwnd = CreateWindowEx(0, L"YuMediaPlayer_TrayClass", L"",
+        m_hwnd = CreateWindowExW(0, L"YuMediaPlayer_TrayClass", L"",
             0, 0, 0, 0, 0,
             HWND_MESSAGE,   // 消息专用窗口，不显示
             nullptr, m_hInstance, nullptr);
@@ -47,31 +69,50 @@
         m_nid.uID = ID_TRAY_ICON;
         m_nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
         m_nid.uCallbackMessage = WM_TRAYICON;
-        // 使用系统默认应用图标，替换成你的图标资源
-        m_nid.hIcon = (HICON)LoadImage(
-            nullptr,              // hInstance 填 nullptr 表示从文件加载
-            L"icons/logo.ico",    // 相对于 exe 所在目录的路径
-            IMAGE_ICON,
-            16, 16,               // 托盘图标尺寸，16x16 最合适
-            LR_LOADFROMFILE       // ✅ 关键标志：从文件而不是资源加载
-        );
-        if (!m_nid.hIcon)
-            m_nid.hIcon = LoadIcon(nullptr, IDI_APPLICATION);
+        // 记住路径，DPI 变化（WM_DPICHANGED）时要用同一张图重新按新尺寸加载
+        wchar_t exePath[MAX_PATH] = {};
+        DWORD pathLength = GetModuleFileNameW(nullptr, exePath, MAX_PATH); if (pathLength == 0)
+        {
+            m_iconPath = L"icons\\logo.ico";
+        }
+        else
+        {
+            std::wstring fullPath(exePath);
+            std::wstring::size_type slash = fullPath.find_last_of(L"\\/");
+            if (slash != std::wstring::npos)
+            {
+                fullPath.resize(slash + 1);
+            }
+            else { fullPath.clear(); }
+            m_iconPath = fullPath + L"icons\\logo.ico";
+        }
+        
+        m_ownedIcon = LoadTrayIconFromFile(m_iconPath);
+        if (m_ownedIcon != nullptr) { m_nid.hIcon = m_ownedIcon; }
+        else {
+            // 加载失败时使用系统默认图标 
+            m_nid.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+            if (m_nid.hIcon == nullptr)
+            {
+                DestroyWindow(m_hwnd);
+                m_hwnd = nullptr; return false;
+            }
+        }
 
         wcsncpy_s(m_nid.szTip, m_tooltip.c_str(), _TRUNCATE);
 
-        m_created = Shell_NotifyIcon(NIM_ADD, &m_nid);
+        m_created = Shell_NotifyIconW(NIM_ADD, &m_nid);
 
         // 设置版本（支持气泡通知）
         m_nid.uVersion = NOTIFYICON_VERSION_4;
-        Shell_NotifyIcon(NIM_SETVERSION, &m_nid);
+        Shell_NotifyIconW(NIM_SETVERSION, &m_nid);
 
         return m_created;
     }
 
     void TrayIcon::Remove() {
         if (m_created) {
-            Shell_NotifyIcon(NIM_DELETE, &m_nid);
+            Shell_NotifyIconW(NIM_DELETE, &m_nid);
             m_created = false;
         }
     }
@@ -86,41 +127,97 @@
         m_nid.dwInfoFlags = infoFlags;
         wcsncpy_s(m_nid.szInfoTitle, title.c_str(), _TRUNCATE);
         wcsncpy_s(m_nid.szInfo, message.c_str(), _TRUNCATE);
-        Shell_NotifyIcon(NIM_MODIFY, &m_nid);
+        Shell_NotifyIconW(NIM_MODIFY, &m_nid);
         // 清除 NIF_INFO 防止每次修改都弹出
         m_nid.uFlags &= ~NIF_INFO;
     }
 
     void TrayIcon::SetIcon(HICON hIcon) {
+        if (!hIcon || !m_created || !m_hwnd)
+            return;
+
         m_nid.hIcon = hIcon;
-        Shell_NotifyIcon(NIM_MODIFY, &m_nid);
+        Shell_NotifyIconW(NIM_MODIFY, &m_nid);
+    }
+
+    // 按"当前 DPI 下系统认为的小图标尺寸"加载，而不是写死 16x16——
+    // 缩放比例变了（比如 125%/150%/200%），这个尺寸会自动变成 20/24/32 等，
+    // 避免系统把一张 16x16 的图硬拉伸导致看起来又小又糊。
+    // 前提：icons/logo.ico 最好是包含多个尺寸(16/20/24/32/48...)的多分辨率 ico，
+    // 只有一个尺寸的话，系统依然会拉伸这一张图，清晰度提升有限。
+    HICON TrayIcon::LoadTrayIconFromFile(const std::wstring& path) const {
+        int cx = GetSystemMetrics(SM_CXSMICON);
+        int cy = GetSystemMetrics(SM_CYSMICON);
+        return (HICON)LoadImage(
+            nullptr,             // hInstance 填 nullptr 表示从文件加载
+            path.c_str(),        // 图标文件路径
+            IMAGE_ICON,
+            cx, cy,
+            LR_LOADFROMFILE | LR_DEFAULTCOLOR
+        );
+    }
+
+    void TrayIcon::ReloadIconForDpi() {
+        if (m_iconPath.empty())
+            return;
+
+        HICON newIcon = LoadTrayIconFromFile(m_iconPath);
+        if (!newIcon)
+            return; // 加载失败就保留原图标，不动
+
+        SetIcon(newIcon);
+
+        if (m_ownedIcon)
+            DestroyIcon(m_ownedIcon);
+        m_ownedIcon = newIcon;
     }
 
     void TrayIcon::SetTooltip(const std::wstring& tooltip) {
         wcsncpy_s(m_nid.szTip, tooltip.c_str(), _TRUNCATE);
-        Shell_NotifyIcon(NIM_MODIFY, &m_nid);
+        Shell_NotifyIconW(NIM_MODIFY, &m_nid);
     }
 
     // ── 闪烁（模拟QQ未读消息） ──────────────────────────
     void TrayIcon::StartBlink(HICON icon1, HICON icon2, int intervalMs) {
+        if (!m_hwnd || !m_created || !icon1 || !icon2)
+            return;
+
+        if (intervalMs < 50)
+            intervalMs = 50;
+
+        StopBlink();
+
         m_blinkIcon1 = icon1;
         m_blinkIcon2 = icon2;
         m_blinking = true;
         m_blinkState = false;
-        SetTimer(m_hwnd, 42, intervalMs, BlinkTimerProc);
+        SetIcon(m_blinkIcon1);
+        SetTimer(m_hwnd, 42, static_cast<UINT>(intervalMs), BlinkTimerProc);
     }
 
     void TrayIcon::StopBlink() {
-        if (m_blinking) {
+        if (m_hwnd)
             KillTimer(m_hwnd, 42);
+
+        if (m_blinking) {
             m_blinking = false;
-            // 恢复原图标
-            if (m_blinkIcon1) SetIcon(m_blinkIcon1);
+            if (m_blinkIcon1)
+                SetIcon(m_blinkIcon1);
         }
+
+        m_blinkIcon1 = nullptr;
+        m_blinkIcon2 = nullptr;
+        m_blinkState = false;
     }
 
     void CALLBACK TrayIcon::BlinkTimerProc(HWND hwnd, UINT, UINT_PTR, DWORD) {
-        if (!g_trayInstance || !g_trayInstance->m_blinking) return;
+        if (!g_trayInstance || !g_trayInstance->m_blinking)
+            return;
+
+        if (!g_trayInstance->m_blinkIcon1 ||
+            !g_trayInstance->m_blinkIcon2)
+            return;
+
         g_trayInstance->m_blinkState = !g_trayInstance->m_blinkState;
         g_trayInstance->SetIcon(g_trayInstance->m_blinkState
             ? g_trayInstance->m_blinkIcon2
@@ -130,11 +227,11 @@
     // ── 右键菜单 ────────────────────────────────────────
     void TrayIcon::ShowContextMenu() {
         HMENU hMenu = CreatePopupMenu();
-        AppendMenu(hMenu, MF_STRING, ID_TRAY_SHOW, L"显示 YuMediaPlayer");
-        AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenu(hMenu, MF_STRING, ID_TRAY_CHECK, L"检查更新");
-        AppendMenu(hMenu, MF_SEPARATOR, 0, nullptr);
-        AppendMenu(hMenu, MF_STRING, ID_TRAY_EXIT, L"退出");
+        AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"显示 YuMediaPlayer");
+        AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(hMenu, MF_STRING, ID_TRAY_CHECK, L"检查更新");
+        AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(hMenu, MF_STRING, ID_TRAY_EXIT, L"退出");
 
         POINT pt;
         GetCursorPos(&pt);
@@ -171,7 +268,7 @@
     LRESULT CALLBACK TrayIcon::WndProc(HWND hwnd, UINT msg,
         WPARAM wParam, LPARAM lParam)
     {
-        if (!g_trayInstance) return DefWindowProc(hwnd, msg, wParam, lParam);
+        if (!g_trayInstance) return DefWindowProcW(hwnd, msg, wParam, lParam);
 
         switch (msg) {
         case WM_TRAYICON:
@@ -184,7 +281,8 @@
                 break;
             case ID_TRAY_SHOW:
                 // TODO: 显示你的主窗口
-                ShowWindow(g_trayInstance->m_parentHwnd, SW_SHOW);
+                if (g_trayInstance->m_parentHwnd)
+                ShowWindow(g_trayInstance->m_parentHwnd, SW_RESTORE);
                 break;
             case ID_TRAY_CHECK:
                 g_trayInstance->CheckUpdate();
@@ -192,19 +290,19 @@
             }
             return 0;
         }
-        return DefWindowProc(hwnd, msg, wParam, lParam);
+        return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
 
     std::wstring TrayIcon::HttpGet(const std::wstring& url) {
         std::string result;
 
-        HINTERNET hInternet = InternetOpen(
+        HINTERNET hInternet = InternetOpenW(
             L"YuMediaPlayer-Updater",
             INTERNET_OPEN_TYPE_PRECONFIG,
             nullptr, nullptr, 0);
         if (!hInternet) return L"";
 
-        HINTERNET hConnect = InternetOpenUrl(
+        HINTERNET hConnect = InternetOpenUrlW(
             hInternet,
             url.c_str(),
             nullptr, 0,
@@ -223,8 +321,19 @@
         }
         InternetCloseHandle(hInternet);
 
-        // 转换为 wstring
-        return std::wstring(result.begin(), result.end());
+        // GitHub API 返回 UTF-8，正确转换为 UTF-16。
+        if (result.empty()) return L"";
+
+        int len = MultiByteToWideChar(
+            CP_UTF8, 0, result.data(), static_cast<int>(result.size()),
+            nullptr, 0);
+        if (len <= 0) return L"";
+
+        std::wstring wideResult(static_cast<size_t>(len), L'\0');
+        MultiByteToWideChar(
+            CP_UTF8, 0, result.data(), static_cast<int>(result.size()),
+            &wideResult[0], len);
+        return wideResult;
     }
 
     // ── 从 GitHub API JSON 里提取 tag_name ───────────────────
@@ -239,7 +348,8 @@
         if (pos == std::string::npos) return L"";
         pos++;  // 跳过引号
 
-        // 跳过可能的 'v' 前缀
+        // 跳过可能的 'v' 前缀，先检查边界
+        if (pos >= json.size()) return L"";
         if (json[pos] == 'v') pos++;
 
         size_t end = json.find('"', pos);
@@ -265,8 +375,21 @@
             return;
         }
 
-        // 转回 string 用于解析
-        std::string json(response.begin(), response.end());
+        // 转回 UTF-8 string 用于 JSON 解析。
+        int jsonLen = WideCharToMultiByte(
+            CP_UTF8, 0, response.c_str(), static_cast<int>(response.size()),
+            nullptr, 0, nullptr, nullptr);
+        if (jsonLen <= 0) {
+            ShowBalloon(L"检查更新失败", L"版本信息编码转换失败。",
+                3000, NIIF_ERROR);
+            return;
+        }
+
+        std::string json(static_cast<size_t>(jsonLen), '\0');
+        WideCharToMultiByte(
+            CP_UTF8, 0, response.c_str(), static_cast<int>(response.size()),
+            &json[0], jsonLen, nullptr, nullptr);
+
         std::wstring latestVer = ParseLatestVersion(json);
 
         if (latestVer.empty()) {
@@ -275,16 +398,25 @@
             return;
         }
 
-        if (latestVer == APP_VERSION) {
-            // 已是最新
-            ShowBalloon(L"已是最新版本",
-                L"当前版本 v" APP_VERSION L" 已是最新。",
-                3000, NIIF_INFO);
+        // APP_VERSION 通常是 L"1.0.0"。这里显式构造 wstring，
+        // 避免宏类型/字符串拼接造成临时对象和编码问题。
+#ifdef APP_VERSION
+        const std::wstring currentVer = APP_VERSION;
+#else
+        const std::wstring currentVer = L"0.0.0";
+#endif
+
+        if (latestVer == currentVer) {
+            ShowBalloon(
+                L"已是最新版本",
+                L"当前版本 v" + currentVer + L" 已是最新。",
+                3000,
+                NIIF_INFO);
         }
         else {
-            // 有新版本，询问是否打开下载页
-            std::wstring msg = L"发现新版本 v" + latestVer +
-                L"\n当前版本 v" APP_VERSION
+            std::wstring msg =
+                L"发现新版本 v" + latestVer +
+                L"\n当前版本 v" + currentVer +
                 L"\n\n是否前往 GitHub 下载？";
 
             int ret = MessageBox(m_parentHwnd, msg.c_str(),
@@ -293,7 +425,7 @@
                 // 打开浏览器跳转到 releases 页
                 std::wstring releaseUrl =
                     L"https://github.com/qizhiwoniu/YuMediaPlayer/releases/latest";
-                ShellExecute(nullptr, L"open", releaseUrl.c_str(),
+                ShellExecuteW(nullptr, L"open", releaseUrl.c_str(),
                     nullptr, nullptr, SW_SHOWNORMAL);
             }
         }

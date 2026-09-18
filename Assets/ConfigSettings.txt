@@ -1,1 +1,4 @@
-Language=简体中文;
+Language=SimpleChinese.yu;
+DefaultSkin=Dark;
+DefaultFont=胡敬礼毛笔行书简.TTF;
+DefaultTheme=Dark;
