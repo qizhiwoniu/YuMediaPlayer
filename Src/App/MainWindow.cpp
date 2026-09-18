@@ -990,6 +990,159 @@ namespace YuMediaPlayer
 					}
 				}
 			}
+			else if (m_isAnimating && m_animationIsCollapsing)
+			{
+				// 收起动画：背景卡片向右收缩，但保持可见
+				// 文字逐渐透明消失，头像始终可见
+
+				// 绘制背景卡片（保持完全不透明，但宽度递减）
+				Gdiplus::RectF cardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
+				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
+
+				Gdiplus::GraphicsPath path;
+				float radius = 12.0f;
+				float d = radius * 2.0f;
+				path.AddArc(cardRect.X, cardRect.Y, d, d, 180.0f, 90.0f);
+				path.AddArc(cardRect.GetRight() - d, cardRect.Y, d, d, 270.0f, 90.0f);
+				path.AddArc(cardRect.GetRight() - d, cardRect.GetBottom() - d, d, d, 0.0f, 90.0f);
+				path.AddArc(cardRect.X, cardRect.GetBottom() - d, d, d, 90.0f, 90.0f);
+				path.CloseFigure();
+				g.FillPath(&cardBrush, &path);
+
+				// 绘制头像（始终可见）
+				// X 从 8 改为 18：向右移动 10px，让卡片左边露出一点在头像左侧。
+				Gdiplus::RectF avatarRect(18.0f, 0.0f, 84.0f, 84.0f);
+				m_avatarRectF = avatarRect;
+				m_avatar.Draw(g, avatarRect);
+
+				// 绘制歌曲信息（逐渐透明消失）
+				float textAlphaProgress = m_animationProgress;  // 文字随着动画进度逐渐消失
+				
+				if (!m_trackTitle.empty() || !m_trackArtist.empty())
+				{
+					float textX = avatarRect.GetRight() + 15.0f;
+					float textWidth = cardRect.GetRight() - textX - 10.0f;
+					float cardCenterY = cardRect.Y + (cardRect.Height / 2.0f);
+
+					if (textWidth > 0)
+					{
+						Gdiplus::StringFormat stringFormat;
+						stringFormat.SetAlignment(Gdiplus::StringAlignmentNear);
+						stringFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+						stringFormat.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+
+						Gdiplus::Font titleFont(L"Microsoft YaHei UI", 11.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+						Gdiplus::Font artistFont(L"Microsoft YaHei UI", 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+						
+						// 文字逐渐消失（透明度递增）
+						int titleAlpha = (int)(255.0f * (1.0f - textAlphaProgress));
+						int artistAlpha = (int)(200.0f * (1.0f - textAlphaProgress));
+						
+						Gdiplus::SolidBrush titleBrush(Gdiplus::Color(titleAlpha, 255, 255, 255));
+						Gdiplus::SolidBrush artistBrush(Gdiplus::Color(artistAlpha, 200, 200, 200));
+
+						bool hasBoth = !m_trackTitle.empty() && !m_trackArtist.empty();
+						if (hasBoth)
+						{
+							float titleH = titleFont.GetHeight(&g);
+							float artistH = artistFont.GetHeight(&g);
+							float totalH = titleH + artistH - 2.0f;
+							float startY = cardCenterY - totalH / 2.0f;
+
+							g.DrawString(m_trackTitle.c_str(), -1, &titleFont,
+								Gdiplus::PointF(textX, startY), &titleBrush);
+							g.DrawString(m_trackArtist.c_str(), -1, &artistFont,
+								Gdiplus::PointF(textX, startY + titleH - 2.0f), &artistBrush);
+						}
+						else
+						{
+							const std::wstring& single = m_trackTitle.empty() ? m_trackArtist : m_trackTitle;
+							Gdiplus::Font& font = m_trackTitle.empty() ? artistFont : titleFont;
+							Gdiplus::SolidBrush& brush = m_trackTitle.empty() ? artistBrush : titleBrush;
+
+							float h = font.GetHeight(&g);
+							float startY = cardCenterY - h / 2.0f;
+							g.DrawString(single.c_str(), -1, &font, Gdiplus::PointF(textX, startY), &brush);
+						}
+					}
+				}
+			}
+			else if (m_isAnimating && !m_animationIsCollapsing)
+			{
+				// 展开动画：背景卡片保持可见，文字逐渐出现
+				
+				// 绘制背景卡片（始终可见，完全不透明）
+				Gdiplus::RectF cardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
+				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
+
+				Gdiplus::GraphicsPath path;
+				float radius = 12.0f;
+				float d = radius * 2.0f;
+				path.AddArc(cardRect.X, cardRect.Y, d, d, 180.0f, 90.0f);
+				path.AddArc(cardRect.GetRight() - d, cardRect.Y, d, d, 270.0f, 90.0f);
+				path.AddArc(cardRect.GetRight() - d, cardRect.GetBottom() - d, d, d, 0.0f, 90.0f);
+				path.AddArc(cardRect.X, cardRect.GetBottom() - d, d, d, 90.0f, 90.0f);
+				path.CloseFigure();
+				g.FillPath(&cardBrush, &path);
+
+				// 绘制头像（始终可见）
+				// X 从 8 改为 18：向右移动 10px，让卡片左边露出一点在头像左侧。
+				Gdiplus::RectF avatarRect(18.0f, 0.0f, 84.0f, 84.0f);
+				m_avatarRectF = avatarRect;
+				m_avatar.Draw(g, avatarRect);
+
+				// 绘制歌曲信息（逐渐显示）
+				float textAlphaProgress = m_animationProgress;
+				
+				if (!m_trackTitle.empty() || !m_trackArtist.empty())
+				{
+					float textX = avatarRect.GetRight() + 15.0f;
+					float textWidth = cardRect.GetRight() - textX - 10.0f;
+					float cardCenterY = cardRect.Y + (cardRect.Height / 2.0f);
+
+					if (textWidth > 0)
+					{
+						Gdiplus::StringFormat stringFormat;
+						stringFormat.SetAlignment(Gdiplus::StringAlignmentNear);
+						stringFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+						stringFormat.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+
+						Gdiplus::Font titleFont(L"Microsoft YaHei UI", 11.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+						Gdiplus::Font artistFont(L"Microsoft YaHei UI", 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+						
+						// 文字逐渐显示（透明度递增）
+						int titleAlpha = (int)(255.0f * textAlphaProgress);
+						int artistAlpha = (int)(200.0f * textAlphaProgress);
+						
+						Gdiplus::SolidBrush titleBrush(Gdiplus::Color(titleAlpha, 255, 255, 255));
+						Gdiplus::SolidBrush artistBrush(Gdiplus::Color(artistAlpha, 200, 200, 200));
+
+						bool hasBoth = !m_trackTitle.empty() && !m_trackArtist.empty();
+						if (hasBoth)
+						{
+							float titleH = titleFont.GetHeight(&g);
+							float artistH = artistFont.GetHeight(&g);
+							float totalH = titleH + artistH - 2.0f;
+							float startY = cardCenterY - totalH / 2.0f;
+
+							g.DrawString(m_trackTitle.c_str(), -1, &titleFont,
+								Gdiplus::PointF(textX, startY), &titleBrush);
+							g.DrawString(m_trackArtist.c_str(), -1, &artistFont,
+								Gdiplus::PointF(textX, startY + titleH - 2.0f), &artistBrush);
+						}
+						else
+						{
+							const std::wstring& single = m_trackTitle.empty() ? m_trackArtist : m_trackTitle;
+							Gdiplus::Font& font = m_trackTitle.empty() ? artistFont : titleFont;
+							Gdiplus::SolidBrush& brush = m_trackTitle.empty() ? artistBrush : titleBrush;
+
+							float h = font.GetHeight(&g);
+							float startY = cardCenterY - h / 2.0f;
+							g.DrawString(single.c_str(), -1, &font, Gdiplus::PointF(textX, startY), &brush);
+						}
+					}
+				}
+			}
 			else
 			{
 				// 正常状态：绘制背景卡片。
