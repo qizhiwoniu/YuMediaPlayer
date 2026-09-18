@@ -2,11 +2,11 @@
 #include <windows.h>
 #include <memory>  
 #include <string>
-//#define GDIPVER 0x0110
 #include <gdiplus.h>
 #include "NotifyIcon/TrayIcon.h"
 #include "Core/Theme.h"
 #include "Core/CircularAvatar.h"
+
 namespace YuMediaPlayer
 {
 	class MainWindow
@@ -41,6 +41,7 @@ namespace YuMediaPlayer
 		static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 		LRESULT EventProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 		bool    InitWindow(const wchar_t* title, int width, int height);
+		
 		enum class CollapseEdge
 		{
 			None,
@@ -57,6 +58,11 @@ namespace YuMediaPlayer
 		void RestoreWindow();
 		void CheckCollapsedMouseHover();
 		void CheckAutoCollapse();
+
+		// 动画相关函数
+		void StartCollapseAnimation();   // 开始收起动画
+		void StartExpandAnimation();     // 开始展开动画
+		void UpdateCollapseAnimation();  // 更新动画帧
 
 	private:
 		// 窗口
@@ -88,5 +94,13 @@ namespace YuMediaPlayer
 		DWORD                         m_lastMouseMoveTick = 0;   // 最近一次鼠标移动时间
 		POINT                         m_lastMousePos{};          // 最近一次鼠标位置
 		bool                          m_isCompositing = false;   // 防止 SetWindowPos/WM_SIZE 导致 Composite 重入
+
+		// ── 收起/展开动画 ────────────────────────────────────────────
+		bool                          m_isAnimating = false;     // 是否正在动画中
+		UINT_PTR                      m_animationTimer = 0;      // 动画定时器
+		float                         m_animationProgress = 0.0f; // 动画进度 [0, 1]
+		int                           m_animationTargetWidth = 0; // 动画目标宽度
+		int                           m_animationStartWidth = 0;  // 动画起始宽度
+		bool                          m_animationIsCollapsing = false; // true = 收起动画，false = 展开动画
 	};
 }

@@ -12,7 +12,7 @@ static int APIENTRY WinMain(HINSTANCE hInst, HINSTANCE, PSTR, int)
     CircularAvatar::InitGdiplus();
     {
         auto mainWindow = std::make_unique<MainWindow>();
-        mainWindow->Initialize(L"YuMediaPlayer", 320, 72); // 高度从 40 调到 72：40px 太矮
+        mainWindow->Initialize(L"YuMediaPlayer", 350, 104);
         mainWindow->Run();
     }
     CircularAvatar::ShutdownGdiplus();
@@ -30,7 +30,7 @@ int main(int argc, char* argv[])
     CircularAvatar::InitGdiplus();
     {
         auto mainWindow = std::make_unique<MainWindow>();
-        mainWindow->Initialize(L"YuMediaPlayer", 320, 72); // 高度从 40 调到 72：40px 太矮
+        mainWindow->Initialize(L"YuMediaPlayer", 350, 104);
         mainWindow->Run();
     }
     CircularAvatar::ShutdownGdiplus();
