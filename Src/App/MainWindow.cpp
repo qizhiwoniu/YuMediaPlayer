@@ -28,9 +28,8 @@ namespace YuMediaPlayer
 
 		RECT rc;
 		GetClientRect(m_hwnd, &rc);
-
-		//m_trayIcon.Create(m_hwnd);  
-		//m_trayIcon.ShowBalloon(L"YuMediaPlayer starting", L"starting...");
+		m_trayIcon.Create(m_hwnd);
+		m_trayIcon.ShowBalloon(L"YuMediaPlayer starting", L"starting...");
 
 		int clientW = rc.right - rc.left;
 		int clientH = rc.bottom - rc.top;
@@ -67,7 +66,7 @@ namespace YuMediaPlayer
 
 		// 2. 创建分层窗口 - WS_EX_LAYERED 是关键！
 		m_hwnd = CreateWindowEx(
-			WS_EX_LAYERED | WS_EX_TOPMOST,  // 分层窗口 + 总在最前
+			WS_EX_LAYERED | WS_EX_TOPMOST | WS_EX_TOOLWINDOW, // 分层窗口 + 总在最前 + 隐藏任务栏
 			CLASS_NAME,
 			title,
 			WS_POPUP,  // 弹出式窗口，无标题栏
@@ -350,11 +349,11 @@ namespace YuMediaPlayer
 
 			MINMAXINFO* mmi = (MINMAXINFO*)lParam;
 
-			mmi->ptMaxPosition.x = mi.rcWork.left - mi.rcMonitor.left;
-			mmi->ptMaxPosition.y = mi.rcWork.top - mi.rcMonitor.top;
+			mmi->ptMaxPosition.x = mi.rcMonitor.left - mi.rcMonitor.left;
+			mmi->ptMaxPosition.y = mi.rcMonitor.top - mi.rcMonitor.top;
 
-			mmi->ptMaxSize.x = mi.rcWork.right - mi.rcWork.left;
-			mmi->ptMaxSize.y = mi.rcWork.bottom - mi.rcWork.top;
+			mmi->ptMaxSize.x = mi.rcMonitor.right - mi.rcMonitor.left;
+			mmi->ptMaxSize.y = mi.rcMonitor.bottom - mi.rcMonitor.top;
 
 			return 0;
 		}
@@ -455,7 +454,7 @@ namespace YuMediaPlayer
 
 				// 头像：x=8, width=84, 右边缘=92
 				// 我们让头像右边缘停在屏幕右边缘减去一点距离（比如10px）
-				int finalX = mi.rcWork.right - 92 - 10;
+				int finalX = mi.rcMonitor.right - 92 - 10;
 				
 				SetWindowPos(
 					m_hwnd, nullptr,
@@ -497,7 +496,7 @@ namespace YuMediaPlayer
 			GetMonitorInfo(hMon, &mi);
 
 			// 计算目标X位置：头像右边缘（92px）停在屏幕右边缘减去一点距离
-			int targetX = mi.rcWork.right - 92 - 10;
+			int targetX = mi.rcMonitor.right - 92 - 10;
 			
 			// 线性插值当前X位置
 			int currentX = m_savedWindowX + (int)((targetX - m_savedWindowX) * easeProgress);
@@ -523,7 +522,7 @@ namespace YuMediaPlayer
 			// 头像始终停在屏幕右边缘
 			// 当前X = 屏幕右边缘 - 头像右边缘 - 当前宽度中卡片的部分
 			// 为了让窗口从右向左展开，X应该向左移动
-			int collapsedX = mi.rcWork.right - 92 - 10;
+			int collapsedX = mi.rcMonitor.right - 92 - 10;
 			
 			// 计算展开时的X位置：从收起位置逐渐向左展开到原始位置
 			int currentX = collapsedX - (int)((currentWidth - m_animationStartWidth) * 0.5f);
@@ -599,28 +598,28 @@ namespace YuMediaPlayer
 		{
 		case CollapseEdge::Left:
 			shouldRestore =
-				pt.x <= mi.rcWork.left + HOVER_THRESHOLD &&
+				pt.x <= mi.rcMonitor.left + HOVER_THRESHOLD &&
 				pt.y >= wr.top &&
 				pt.y <= wr.bottom;
 			break;
 
 		case CollapseEdge::Right:
 			shouldRestore =
-				pt.x >= mi.rcWork.right - HOVER_THRESHOLD &&
+				pt.x >= mi.rcMonitor.right - HOVER_THRESHOLD &&
 				pt.y >= wr.top &&
 				pt.y <= wr.bottom;
 			break;
 
 		case CollapseEdge::Top:
 			shouldRestore =
-				pt.y <= mi.rcWork.top + HOVER_THRESHOLD &&
+				pt.y <= mi.rcMonitor.top + HOVER_THRESHOLD &&
 				pt.x >= wr.left &&
 				pt.x <= wr.right;
 			break;
 
 		case CollapseEdge::Bottom:
 			shouldRestore =
-				pt.y >= mi.rcWork.bottom - HOVER_THRESHOLD &&
+				pt.y >= mi.rcMonitor.bottom - HOVER_THRESHOLD &&
 				pt.x >= wr.left &&
 				pt.x <= wr.right;
 			break;
@@ -668,10 +667,10 @@ namespace YuMediaPlayer
 
 		const int windowWidth = wr.right - wr.left;
 		const int windowHeight = wr.bottom - wr.top;
-		const bool nearLeft = wr.left <= mi.rcWork.left + EDGE_THRESHOLD;
-		const bool nearRight = wr.right >= mi.rcWork.right - EDGE_THRESHOLD;
-		const bool nearTop = wr.top <= mi.rcWork.top + EDGE_THRESHOLD;
-		const bool nearBottom = wr.bottom >= mi.rcWork.bottom - EDGE_THRESHOLD;
+		const bool nearLeft = wr.left <= mi.rcMonitor.left + EDGE_THRESHOLD;
+		const bool nearRight = wr.right >= mi.rcMonitor.right - EDGE_THRESHOLD;
+		const bool nearTop = wr.top <= mi.rcMonitor.top + EDGE_THRESHOLD;
+		const bool nearBottom = wr.bottom >= mi.rcMonitor.bottom - EDGE_THRESHOLD;
 
 		if (!nearLeft && !nearRight && !nearTop && !nearBottom)
 			return;
@@ -700,20 +699,20 @@ namespace YuMediaPlayer
 			if (nearLeft)
 			{
 				m_collapsedEdge = CollapseEdge::Left;
-				newX = mi.rcWork.left;
+				newX = mi.rcMonitor.left;
 				newY = wr.top;
 			}
 			else if (nearTop)
 			{
 				m_collapsedEdge = CollapseEdge::Top;
 				newX = wr.left;
-				newY = mi.rcWork.top;
+				newY = mi.rcMonitor.top;
 			}
 			else if (nearBottom)
 			{
 				m_collapsedEdge = CollapseEdge::Bottom;
 				newX = wr.left;
-				newY = mi.rcWork.bottom - COLLAPSED_SIZE;
+				newY = mi.rcMonitor.bottom - COLLAPSED_SIZE;
 			}
 
 			m_isCollapsed = true;
