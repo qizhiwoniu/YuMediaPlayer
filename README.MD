@@ -46,7 +46,7 @@ YuMediaPlayer 是一个面向工程师和开发者的**播放器框架**，目�
 ```
 MiniCAD
 │    
-├── assets/                                        # 只读资源，打包进可执行文件
+├── assets/                                        # 只读资源，打包进可执行文件目录
 │   ├── background/                                # ui 背景图资源SVG源文件，构建时生成的PNG图集
 │   ├── disk/                                      # 封面图资源及图片，用于旋转播放的资源
 │   ├── font/                                      # 字体文件，构建所需的字体文件TFT/TTC文件
@@ -56,14 +56,15 @@ MiniCAD
 │   ├── ui/                                        # GUI资源 显示窗口所需要的资源文件
 │   └── userprofile/                               # 用户文件
 │   
-├── fengbao/  
+├── fengbao/                                       # 程序写完的 打包/封包 文件目录
 │   ├── fengbao.ism (暂无)                         # (预留)InstallShield 2025 封包文件
 │   ├── fengbao.iss                                # Inno setup Compiler 6 封包文件
-│   └── YuMediaPlayer.evb                          # Enigma Virtual Box 封包压缩文件
+│   ├── YuMediaPlayer.evb                          # Enigma Virtual Box 封包压缩文件
 │   └── setup.exe(ver x.x.x.x)                     # 正式安装文件（版本x.x.x.x)
 │ 
-├── src/
-│   │
+├── out/                                          # 计算机自动输出的生成文件目录
+│ 
+├── src/                                          # 资源文件目录
 │   ├── App/                                      # APP
 │   │   ├── Main.cpp                              # 初始化主函数
 │   │   ├── MainWindow.cpp                        # 主窗口初始化
