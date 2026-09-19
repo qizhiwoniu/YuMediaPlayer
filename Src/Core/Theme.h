@@ -13,8 +13,10 @@
 #define ID_TRAY_EXIT 2001
 #define ID_TRAY_SHOW 2002
 #define ID_TRAY_CHECK 2003
-#define ID_THEME_LIGHT 2004
-#define ID_THEME_DARK 2005
+#define ID_TRAY_CLOSETXT 2004
+#define ID_TRAY_SETTINGS 2005
+#define ID_THEME_LIGHT 2006
+#define ID_THEME_DARK 2007
 class Theme {
 public:
 
