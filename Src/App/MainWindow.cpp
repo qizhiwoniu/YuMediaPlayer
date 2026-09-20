@@ -5,7 +5,9 @@
 #include <windowsx.h>
 #include <algorithm>
 #include "Core/Theme.h"
+#include "UI/WindowGUI.h"
 #include "UI/miniWindowGUI.h"
+#include "NotifyIcon/TrayIcon.h"
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -15,7 +17,8 @@ namespace YuMediaPlayer
 	MainWindow::MainWindow()
 		: m_hwnd(0)
 		, m_theme()
-		, m_trayIcon(GetModuleHandle(nullptr), L"YuMediaPlayer")
+		, m_trayIcon(GetModuleHandle(nullptr), L"余余音乐播放器")
+		, m_windowGUI(nullptr)
 	{}
 
 	MainWindow::~MainWindow()
@@ -26,16 +29,22 @@ namespace YuMediaPlayer
 		if (!InitWindow(title, width, height))
 			return false;
 
+		m_windowGUI = std::make_unique<YuMediaPlayer::WindowGUI>();
+		if (!m_windowGUI->InitWindow(title, width, height))
+		{
+			return false;
+		}
+
 		RECT rc;
 		GetClientRect(m_hwnd, &rc);
 		m_trayIcon.Create(m_hwnd);
 		m_trayIcon.ShowBalloon(L"YuMediaPlayer starting", L"starting...");
-
+		m_trayIcon.SetWindowGUI(m_windowGUI.get());
 		int clientW = rc.right - rc.left;
 		int clientH = rc.bottom - rc.top;
 
 		Composite();
-
+		m_windowGUI->HideWindowGUI();
 		return true; 
 	}
 
@@ -316,11 +325,11 @@ namespace YuMediaPlayer
 			bool right = pt.x >= wr.right - border;
 			bool top = pt.y < wr.top + border;
 			bool bottom = pt.y >= wr.bottom - border;
-			bool middle = !left && !right && !top && !bottom;
+		/*	bool middle = !left && !right && !top && !bottom;
 			bool middleTop = !left && !right && top;
 			bool middleBottom = !left && !right && bottom;
 			bool center = pt.x >= wr.left + (wr.right - wr.left) / 2 && pt.y >= wr.top + (wr.bottom - wr.top) / 2;
-			
+			*/
 			// 角落
 			if (top && left)     return HTTOPLEFT;
 			if (top && right)    return HTTOPRIGHT;

@@ -1,5 +1,6 @@
 #include "miniWindowGUI.h"
-
+#include "UI\WindowGUI.h"
+#include "TrayIcon.h"
 namespace YuMediaPlayer
 {
 	namespace
@@ -117,8 +118,72 @@ namespace YuMediaPlayer
 		{
 			s_currentLoopMode = static_cast<UINT>(cmd);
 		}
+		else if (cmd != 0)
+		{
+			HandleMiniPlayerContextMenuCommand(hwnd, cmd);
+		}
 
 		return cmd;
+	}
+
+	void HandleMiniPlayerContextMenuCommand(HWND hwnd, int cmd)
+	{
+		switch (cmd)
+		{
+		case ContextMenuCommand::MenuItem1:
+			// 总在最前
+			break;
+
+		case ContextMenuCommand::MenuItem2:
+		{
+			OutputDebugStringW(L"[1] MenuItem2\n");
+
+			if (!m_windowGUI)
+			{
+				OutputDebugStringW(L"[2] m_windowGUI nullptr\n");
+				break;
+			}
+
+			OutputDebugStringW(L"[3] m_windowGUI valid pointer\n");
+
+			HWND windowHwnd = m_windowGUI->GetHWND();
+
+			OutputDebugStringW(L"[4] GetHWND OK\n");
+
+			if (!::IsWindow(windowHwnd))
+			{
+				OutputDebugStringW(L"[5] HWND invalid\n");
+				break;
+			}
+
+			OutputDebugStringW(L"[6] HWND valid\n");
+
+			if (::IsWindowVisible(windowHwnd) && !::IsIconic(windowHwnd))
+			{
+				OutputDebugStringW(L"[7] Hide\n");
+				m_windowGUI->HideWindowGUI();
+			}
+			else
+			{
+				OutputDebugStringW(L"[8] Show\n");
+				m_windowGUI->ShowWindowGUI();
+			}
+
+			break;
+		}
+		case ContextMenuCommand::MenuItem3:
+			// 打开桌面歌词
+			break;
+
+		case ContextMenuCommand::MenuItem4:
+			// 歌词/歌曲，反馈
+			break;
+
+		case ContextMenuCommand::Exit:
+			// 退出
+			PostQuitMessage(0);
+			break;
+		}
 	}
 
 	void MeasureMiniPlayerMenuItem(MEASUREITEMSTRUCT& mis)

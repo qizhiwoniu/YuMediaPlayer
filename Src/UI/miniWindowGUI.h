@@ -1,6 +1,7 @@
 #pragma once
 #include <windows.h>
 #include <windowsx.h>
+#include "WindowGUI.h"
 
 namespace YuMediaPlayer
 {
@@ -28,7 +29,7 @@ namespace YuMediaPlayer
 	// 如果选中的是循环模式子菜单里的某一项，内部会记住这个选择，
 	// 下次再弹菜单时该项会带勾选标记，可以用 GetCurrentLoopMode() 查询当前是哪个模式。
 	int ShowMiniPlayerContextMenu(HWND hwnd, POINT pt);
-
+	void HandleMiniPlayerContextMenuCommand(HWND hwnd, int cmd);
 	// 当前选中的循环模式（ContextMenuCommand::LoopMode* 系列值之一），
 	// 默认是 LoopModeListLoop。真正切歌逻辑可以用这个来判断下一首怎么选。
 	UINT GetCurrentLoopMode();
@@ -46,4 +47,6 @@ namespace YuMediaPlayer
 	//       return TRUE;
 	void MeasureMiniPlayerMenuItem(MEASUREITEMSTRUCT& mis);
 	void DrawMiniPlayerMenuItem(const DRAWITEMSTRUCT& dis);
+
+	YuMediaPlayer::WindowGUI* m_windowGUI;
 }
