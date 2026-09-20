@@ -23,32 +23,10 @@ public:
     //background - color: f0f0f0;
 	//background - color: #000000;
 
-    // 显示气泡通知（类似QQ消息提示）
-    void ShowBalloon(const std::wstring& title,
-        const std::wstring& message,
-        DWORD timeoutMs = 3000,
-        DWORD infoFlags = NIIF_INFO);
-
-    // 更新图标（比如未读消息时换红点图标）
-    void SetIcon(HICON hIcon);
-    void SetTooltip(const std::wstring& tooltip);
 
 
 private:
-    static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
-        WPARAM wParam, LPARAM lParam);
-    void OnTrayMessage(WPARAM wParam, LPARAM lParam);
-    void ShowContextMenu();
-    static void CALLBACK BlinkTimerProc(HWND hwnd, UINT msg,
-        UINT_PTR id, DWORD time);
-    void CheckUpdate();                          // 检查更新
-    std::wstring HttpGet(const std::wstring& url); // 请求GitHub API
-    std::wstring ParseLatestVersion(const std::string& json); // 解析版本号
-    HINSTANCE       m_hInstance;
-    HWND            m_hwnd;
-    HWND            m_parentHwnd;
-    NOTIFYICONDATA  m_nid;
-    std::wstring    m_tooltip;
-    bool            m_created;
+
+ 
 
 };

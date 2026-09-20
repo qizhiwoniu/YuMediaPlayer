@@ -3,7 +3,7 @@
 ; Non-commercial use only
 
 #define MyAppName "YuMusic"
-#define MyAppVersion "1.0.0.0"
+#define MyAppVersion "1.0.0.1"
 #define MyAppPublisher "余鹏"
 #define MyAppURL "https://github.com/qizhiwoniu"
 #define MyAppExeName "YuMeidaPlayer.exe"
