@@ -7,11 +7,14 @@
 #include "Core/Theme.h"
 #include "Core/CircularAvatar.h"
 
+class TrayIcon;
+
 namespace YuMediaPlayer
 {
+	class WindowGUI;
+
 	class MainWindow
 	{
-
 	public:
 		MainWindow();
 		~MainWindow();
@@ -41,7 +44,7 @@ namespace YuMediaPlayer
 		static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 		LRESULT EventProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 		bool    InitWindow(const wchar_t* title, int width, int height);
-		
+
 		enum class CollapseEdge
 		{
 			None,
@@ -65,6 +68,8 @@ namespace YuMediaPlayer
 		void UpdateCollapseAnimation();  // 更新动画帧
 
 	private:
+
+
 		// 窗口
 		HWND						  m_hwnd;
 		Theme						  m_theme;
@@ -78,7 +83,7 @@ namespace YuMediaPlayer
 
 		// ── 分层窗口合成用的位图（32bpp, 预乘 Alpha）──────────────
 		HBITMAP                       m_dibSection = nullptr;
-		void*                         m_dibBits = nullptr;
+		void* m_dibBits = nullptr;
 		int                           m_bitmapW = 0;
 		int                           m_bitmapH = 0;
 
@@ -102,5 +107,9 @@ namespace YuMediaPlayer
 		int                           m_animationTargetWidth = 0; // 动画目标宽度
 		int                           m_animationStartWidth = 0;  // 动画起始宽度
 		bool                          m_animationIsCollapsing = false; // true = 收起动画，false = 展开动画
+
+	private:
+		//std::unique_ptr<TrayIcon> m_trayIcon;
+		std::unique_ptr<YuMediaPlayer::WindowGUI> m_windowGUI;
 	};
 }

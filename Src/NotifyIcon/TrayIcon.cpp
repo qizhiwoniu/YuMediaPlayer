@@ -5,6 +5,69 @@
 #include <string>
 #include "UI/WindowGUI.h"
 
+// ============================================================
+// Windows 10/11 原生菜单暗黑模式
+// uxtheme.dll:
+// #135 = SetPreferredAppMode
+// #136 = FlushMenuThemes
+// ============================================================
+static void EnableDarkPopupMenu()
+{
+    HMODULE hUxTheme = LoadLibraryExW(
+        L"uxtheme.dll",
+        nullptr,
+        LOAD_LIBRARY_SEARCH_SYSTEM32
+    );
+
+    if (!hUxTheme)
+        return;
+
+    enum PreferredAppMode
+    {
+        Default = 0,
+        AllowDark = 1,
+        ForceDark = 2,
+        ForceLight = 3,
+        Max = 4
+    };
+
+    using SetPreferredAppModeFunc =
+        PreferredAppMode(WINAPI*)(PreferredAppMode);
+
+    using FlushMenuThemesFunc =
+        void(WINAPI*)();
+
+    auto SetPreferredAppMode =
+        reinterpret_cast<SetPreferredAppModeFunc>(
+            GetProcAddress(
+                hUxTheme,
+                MAKEINTRESOURCEA(135)
+            )
+            );
+
+    auto FlushMenuThemes =
+        reinterpret_cast<FlushMenuThemesFunc>(
+            GetProcAddress(
+                hUxTheme,
+                MAKEINTRESOURCEA(136)
+            )
+            );
+
+    if (SetPreferredAppMode)
+    {
+        // 强制使用暗黑菜单
+        SetPreferredAppMode(ForceDark);
+    }
+
+    if (FlushMenuThemes)
+    {
+        // 关键：刷新 Popup Menu 的主题缓存
+        FlushMenuThemes();
+    }
+
+    FreeLibrary(hUxTheme);
+}
+
 #pragma comment(lib, "wininet.lib")
 #pragma comment(lib, "shell32.lib")
 
@@ -16,7 +79,8 @@
         , m_parentHwnd(nullptr)
         , m_nid{}
         , m_tooltip(tooltip)
-        , m_created(false)
+        , m_created(false) 
+        , m_windowGUI(nullptr)
         , m_blinkIcon1(nullptr)
         , m_blinkIcon2(nullptr)
         , m_blinkState(false)
@@ -359,11 +423,12 @@
 
     // ── 右键菜单 ────────────────────────────────────────
     void TrayIcon::ShowContextMenu() {
+        EnableDarkPopupMenu();
         HMENU hMenu = CreatePopupMenu();
         if (!hMenu) return;
 
         // ✅ 添加菜单项
-        AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"显示主窗口");
+        AppendMenuW(hMenu, MF_STRING, ID_TRAY_SHOW, L"主窗口(显示/隐藏)");
         AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(hMenu, MF_STRING, ID_TRAY_CLOSETXT, L"关闭桌面歌词");
         AppendMenuW(hMenu, MF_STRING, ID_TRAY_SETTINGS, L"设置");
@@ -378,56 +443,62 @@
         SetForegroundWindow(m_hwnd);
         
         // ✅ 显示菜单（位置：鼠标右下角对齐）
-        TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON,
+        int cmd = TrackPopupMenu(hMenu, TPM_BOTTOMALIGN | TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
             pt.x, pt.y, 0, m_hwnd, nullptr);
         
         DestroyMenu(hMenu);
-    }
+      
+        switch (cmd)
+        {
+        case ID_TRAY_SHOW:
+            // 显示 WindowGUI 窗口
+            if (m_windowGUI)
+            {
+                HWND hwnd = m_windowGUI->GetHWND(); // 需要你提供获取 HWND 的函数
 
-    // ── 消息处理 ────────────────────────────────────────
-    void TrayIcon::OnTrayMessage(WPARAM wParam, LPARAM lParam) {
-        UINT msg = LOWORD(lParam);
-        
-        // ✅ 处理所有可能的托盘消息
-        switch (msg) {
-        case WM_LBUTTONDBLCLK:   // 双击 → 显示主窗口
-            if (m_parentHwnd)
+                if (::IsWindowVisible(hwnd))
+                {
+                    // 当前显示 → 隐藏
+                    m_windowGUI->HideWindowGUI();
+                }
+                else
+                {
+                    // 当前隐藏 → 显示
+                    m_windowGUI->ShowWindowGUI();
+                }
+            }
+            else if (m_parentHwnd)
             {
-                ::ShowWindow(m_parentHwnd, SW_RESTORE);
-                ::SetForegroundWindow(m_parentHwnd);
+                if (::IsWindowVisible(m_parentHwnd))
+                {
+                    ::ShowWindow(m_parentHwnd, SW_HIDE);
+                }
+                else
+                {
+                    ::ShowWindow(m_parentHwnd, SW_RESTORE);
+                    ::SetForegroundWindow(m_parentHwnd);
+                }
             }
             break;
-            
-        case WM_LBUTTONUP:        // 左键单击 → 显示主窗口
-            if (m_parentHwnd)
-            {
-                ::ShowWindow(m_parentHwnd, SW_RESTORE);
-                ::SetForegroundWindow(m_parentHwnd);
-            }
+
+        case ID_TRAY_CLOSETXT:
+            // TODO: 关闭桌面歌词
             break;
-            
-        case WM_RBUTTONUP:        // 右键 → 弹出菜单
-            ShowContextMenu();
+
+        case ID_TRAY_SETTINGS:
+            // TODO: 打开设置窗口
             break;
-            
-        case NIN_BALLOONUSERCLICK: // 点击气泡通知 → 显示主窗口
-            if (m_parentHwnd)
-            {
-                ::ShowWindow(m_parentHwnd, SW_RESTORE);
-                ::SetForegroundWindow(m_parentHwnd);
-            }
+
+        case ID_TRAY_CHECK:
+            CheckUpdate();
             break;
-            
-        case NIN_BALLOONTIMEOUT:   // 气泡通知超时消失
-            // 通知已经自动消失，无需处理
-            break;
-            
-        case WM_MOUSEMOVE:         // 鼠标悬停 → 显示工具提示（系统自动）
-            // 系统会自动显示 szTip 中的内容
+
+        case ID_TRAY_EXIT:
+            PostQuitMessage(0);
             break;
         }
     }
-
+    
     LRESULT CALLBACK TrayIcon::WndProc(HWND hwnd, UINT msg,
         WPARAM wParam, LPARAM lParam)
     {
@@ -437,25 +508,59 @@
         case WM_TRAYICON:
             g_trayInstance->OnTrayMessage(wParam, lParam);
             return 0;
-        case WM_COMMAND:
-            switch (LOWORD(wParam)) {
-            case ID_TRAY_EXIT:
-                PostQuitMessage(0);
-                break;
-            case ID_TRAY_SHOW:
-                // TODO: 显示你的主窗口
-                //if (g_trayInstance->m_parentHwnd)
-                //g_trayInstance->WindowGUI::ShowWindowGUI();
-                break;
-            case ID_TRAY_CHECK:
-                g_trayInstance->CheckUpdate();
-                break;
+        case WM_TIMER:
+            if (wParam == 999 && g_trayInstance->m_blinking)
+            {
+                g_trayInstance->BlinkTimerProc(hwnd, msg, wParam, GetTickCount());
             }
             return 0;
         }
         return DefWindowProcW(hwnd, msg, wParam, lParam);
     }
+    // ── 消息处理 ────────────────────────────────────────
+    void TrayIcon::OnTrayMessage(WPARAM wParam, LPARAM lParam) {
+        UINT msg = LOWORD(lParam);
 
+        // ✅ 处理所有可能的托盘消息
+        switch (msg) {
+        case WM_LBUTTONDBLCLK:   // 双击 → 显示主窗口
+            if (m_parentHwnd)
+            {
+                ::ShowWindow(m_parentHwnd, SW_RESTORE);
+                ::SetForegroundWindow(m_parentHwnd);
+            }
+            break;
+
+        case WM_LBUTTONUP:        // 左键单击 → 显示主窗口
+            if (m_parentHwnd)
+            {
+                ::ShowWindow(m_parentHwnd, SW_RESTORE);
+                ::SetForegroundWindow(m_parentHwnd);
+            }
+            break;
+
+        case WM_RBUTTONUP:        // 右键 → 弹出菜单
+            ShowContextMenu();
+            break;
+
+        case NIN_BALLOONUSERCLICK: // 点击气泡通知 → 显示主窗口
+            if (m_parentHwnd)
+            {
+                ::ShowWindow(m_parentHwnd, SW_RESTORE);
+                ::SetForegroundWindow(m_parentHwnd);
+            }
+            break;
+
+        case NIN_BALLOONTIMEOUT:   // 气泡通知超时消失
+            // 通知已经自动消失，无需处理
+            break;
+
+        case WM_MOUSEMOVE:         // 鼠标悬停 → 显示工具提示（系统自动）
+            // 系统会自动显示 szTip 中的内容
+            break;
+        }
+    }
+    
     std::wstring TrayIcon::HttpGet(const std::wstring& url) {
         std::string result;
 
