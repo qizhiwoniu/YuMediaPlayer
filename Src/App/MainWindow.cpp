@@ -13,6 +13,11 @@
 
 namespace YuMediaPlayer
 {
+	// 全局播放按钮信息（需要声明在命名空间中）
+	PlayButtonInfo g_playButtonInfo = {};
+
+	// 当前正在播放的文件路径（用于暂停/继续播放）
+	std::wstring g_currentMp3Path = L"";
 
 	MainWindow::MainWindow()
 		: m_hwnd(0)
@@ -22,12 +27,19 @@ namespace YuMediaPlayer
 	{}
 
 	MainWindow::~MainWindow()
-	{}
+	{
+		CleanupAudioPlayer();  // <<<新增
+	}
 
 	bool MainWindow::Initialize(const wchar_t* title, int width, int height)
 	{
 		if (!InitWindow(title, width, height))
 			return false;
+		
+		if (!InitializeAudioPlayer())  // <<<新增
+		{
+			OutputDebugStringW(L"Warning: Audio player init failed\n");
+		}
 
 		m_windowGUI = std::make_unique<YuMediaPlayer::WindowGUI>();
 		if (!m_windowGUI->InitWindow(title, width, height))
@@ -229,9 +241,12 @@ namespace YuMediaPlayer
 			POINT pt;
 			pt.x = GET_X_LPARAM(lParam);
 			pt.y = GET_Y_LPARAM(lParam);
-			int cmd = ShowMiniPlayerContextMenu(hwnd, pt);
-			if (cmd == ContextMenuCommand::Exit)
-				PostQuitMessage(0);
+			int cmd = ShowMiniPlayerContextMenu(hwnd, pt, m_windowGUI.get());  
+			if (cmd != 0)
+			{
+				// ✅ 添加第三个参数：m_windowGUI.get()
+				HandleMiniPlayerContextMenuCommand(hwnd, cmd, m_windowGUI.get());
+			}
 			return 0;
 		}
 		case WM_NCRBUTTONUP:
@@ -241,10 +256,13 @@ namespace YuMediaPlayer
 				POINT pt;
 				pt.x = GET_X_LPARAM(lParam);
 				pt.y = GET_Y_LPARAM(lParam);
-				int cmd = ShowMiniPlayerContextMenu(hwnd, pt);
-				if (cmd == ContextMenuCommand::Exit)
-					PostQuitMessage(0);
-				return 0; 
+				int cmd = ShowMiniPlayerContextMenu(hwnd, pt, m_windowGUI.get());  
+				if (cmd != 0)
+				{
+					// ✅ 添加第三个参数：m_windowGUI.get()
+					HandleMiniPlayerContextMenuCommand(hwnd, cmd, m_windowGUI.get());
+				}
+				return 0;
 			}
 			break;
 		}
@@ -260,12 +278,15 @@ namespace YuMediaPlayer
 		{
 			PAINTSTRUCT ps;
 			HDC hdc = BeginPaint(hwnd, &ps);
-
+			
 			RECT rc;
 			GetClientRect(hwnd, &rc);
 
 			static HBRUSH s_darkBrush = CreateSolidBrush(RGB(24, 24, 24)); // background
 			FillRect(hdc, &rc, s_darkBrush);
+
+			int clientW = rc.right - rc.left;
+			int clientH = rc.bottom - rc.top;
 
 			EndPaint(hwnd, &ps);
 			return 0;
@@ -299,6 +320,18 @@ namespace YuMediaPlayer
 				}
 				return 0;
 			}
+			POINT pt;
+			pt.x = GET_X_LPARAM(lParam);
+			pt.y = GET_Y_LPARAM(lParam);
+
+			if (IsPointInPlayButton(pt, g_playButtonInfo))
+			{
+				std::wstring mp3 = L"Assets\\song\\local\\周杰伦-七里香.mp3";
+				HandlePlayButtonClick(hwnd, mp3);  // 播放或暂停
+				TogglePlayPause(hwnd);
+				return 0;
+			}
+			
 			return 0;
 		}
 		case WM_MOUSEMOVE:
@@ -311,6 +344,23 @@ namespace YuMediaPlayer
 			if (m_isCollapsed)
 				CheckCollapsedMouseHover();
 
+			
+			pt.x = GET_X_LPARAM(lParam);
+			pt.y = GET_Y_LPARAM(lParam);
+
+			// ✅ 检测是否悬停在播放按钮上
+			bool wasHovered = g_playButtonInfo.isHovered;
+			g_playButtonInfo.isHovered = IsPointInPlayButton(pt, g_playButtonInfo);
+
+			// 如果悬停状态改变，重新绘制按钮区域
+			if (wasHovered != g_playButtonInfo.isHovered)
+			{
+				InvalidateRect(hwnd, &g_playButtonInfo.buttonRect, FALSE);
+			}
+			g_playButtonInfo.isHovered = IsPointInPlayButton(pt, g_playButtonInfo);
+			if (g_playButtonInfo.isHovered)
+				InvalidateRect(hwnd, &g_playButtonInfo.buttonRect, FALSE);
+			
 			return 0;
 		}
 		case WM_NCHITTEST:
@@ -380,11 +430,11 @@ namespace YuMediaPlayer
 			PostQuitMessage(0);
 			return 0;
 
-		default:
-			return DefWindowProc(hwnd, msg, wParam, lParam);
+		//default:
+			//return DefWindowProc(hwnd, msg, wParam, lParam);
 		}
 
-		return DefWindowProc(hwnd, msg, wParam, lParam);
+		//return DefWindowProc(hwnd, msg, wParam, lParam);
 	}
 
 	void MainWindow::StartCollapseAnimation()
@@ -1176,6 +1226,14 @@ namespace YuMediaPlayer
 				// 绘制歌曲信息。
 				Gdiplus::RectF textCardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
 				DrawTrackInfoGdiplus(g, textCardRect, avatarRect);
+				// 绘制播放按钮。
+				Gdiplus::RectF vRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
+				DrawPlayButtonGdiplus(g, vRect, false, false);
+				DrawPlaybackButtonsGdiplus(g, vRect, avatarRect);
+				//DrawPreviousButtonGdiplus(g, vRect, false);
+				//DrawNextButtonGdiplus(g, vRect, false);
+				
+			    
 			}
 		}
 
@@ -1201,7 +1259,407 @@ namespace YuMediaPlayer
 			ReleaseDC(nullptr, hScreenDC);
 		}
 	}
+	
+	void MainWindow::DrawPlayButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool isPlaying, bool hovered)
+	{
+		// 使用传入的绘图区尺寸计算按钮位置
+		int clientW = static_cast<int>(vRect.Width);
+		int clientH = static_cast<int>(vRect.Height);
 
+		// 播放按钮大小
+		int buttonSize = 30;
+		// ========================================
+		// 布局：
+		// 左边 10px
+		// 封面 84px
+		// 封面右侧 10px
+		// 剩余区域进行居中
+		// 最后向左偏移 20px
+		// ========================================
+
+		const int leftMargin = 10;
+		const int avatarSize = 84;
+		const int avatarRightSpacing = 10;
+
+		const int reservedWidth =
+			leftMargin +
+			avatarSize +
+			avatarRightSpacing;
+
+		const int availableWidth =
+			clientW - reservedWidth;
+
+		// 剩余区域居中 + 向左偏移 20px
+		int buttonX =
+			reservedWidth +
+			(availableWidth - buttonSize) / 2 - 20;
+		// 垂直居中
+		int buttonY =
+			static_cast<int>(vRect.Y) +
+			(clientH - buttonSize) / 2;
+		// 计算按钮区域
+		g_playButtonInfo =
+			CalculatePlayButtonRect(buttonX, buttonY, buttonSize);
+
+		// 获取当前播放状态
+		AudioPlayer* audioPlayer = GetAudioPlayer();
+
+		if (audioPlayer)
+		{
+			g_playButtonInfo.isPlaying =
+				(audioPlayer->GetPlaybackState() == PlaybackState::Playing);
+		}
+		else
+		{
+			g_playButtonInfo.isPlaying = false;
+		}
+
+		// ============================================================
+		// 重点：
+		// 这里不能再 BeginPaint()
+		// 也不能使用 DrawPlayButton(hdc, ...)
+		//
+		// 因为 Composite() 当前正在使用 GDI+ Graphics g
+		// 绘制到 m_dibSection。
+		//
+		// 所以播放按钮也必须直接画到这个 Graphics 上。
+		// ============================================================
+
+		const float x = static_cast<float>(buttonX);
+		const float y = static_cast<float>(buttonY);
+		const float size = static_cast<float>(buttonSize);
+
+		// 播放按钮背景圆
+		Gdiplus::SolidBrush buttonBrush(
+			Gdiplus::Color(230, 60, 60, 60)
+		);
+
+		g.FillEllipse(
+			&buttonBrush,
+			x,
+			y,
+			size,
+			size
+		);
+
+		// 按钮边框
+		Gdiplus::Pen buttonPen(
+			Gdiplus::Color(255, 180, 180, 180),
+			1.5f
+		);
+
+		g.DrawEllipse(
+			&buttonPen,
+			x + 0.75f,
+			y + 0.75f,
+			size - 1.5f,
+			size - 1.5f
+		);
+
+		// ============================================================
+		// 播放 / 暂停图标
+		// ============================================================
+
+		Gdiplus::SolidBrush iconBrush(
+			Gdiplus::Color(255, 255, 255, 255)
+		);
+
+		if (g_playButtonInfo.isPlaying)
+		{
+			// -------------------------
+			// 暂停图标
+			// -------------------------
+
+			float pauseWidth = 5.0f;
+			float pauseHeight = 16.0f;
+			float gap = 5.0f;
+
+			float totalWidth =
+				pauseWidth * 2.0f + gap;
+
+			float startX =
+				x + (size - totalWidth) / 2.0f;
+
+			float startY =
+				y + (size - pauseHeight) / 2.0f;
+
+			g.FillRectangle(
+				&iconBrush,
+				startX,
+				startY,
+				pauseWidth,
+				pauseHeight
+			);
+
+			g.FillRectangle(
+				&iconBrush,
+				startX + pauseWidth + gap,
+				startY,
+				pauseWidth,
+				pauseHeight
+			);
+		}
+		else
+		{
+			// -------------------------
+			// 播放图标
+			// -------------------------
+
+			Gdiplus::PointF points[3];
+
+			float iconWidth = 10.0f;
+			float iconHeight = 13.0f;
+
+			float startX =
+				x + (size - iconWidth) / 2.0f + 2.0f;
+
+			float startY =
+				y + (size - iconHeight) / 2.0f;
+
+			points[0] = Gdiplus::PointF(
+				startX,
+				startY
+			);
+
+			points[1] = Gdiplus::PointF(
+				startX,
+				startY + iconHeight
+			);
+
+			points[2] = Gdiplus::PointF(
+				startX + iconWidth,
+				startY + iconHeight / 2.0f
+			);
+
+			g.FillPolygon(
+				&iconBrush,
+				points,
+				3
+			);
+		}
+	}
+	void MainWindow::DrawPreviousButtonGdiplus(Gdiplus::Graphics& g,const Gdiplus::RectF& vRect,bool hovered)
+	{
+		const float x = vRect.X;
+		const float y = vRect.Y;
+		const float w = vRect.Width;
+		const float h = vRect.Height;
+
+		Gdiplus::SolidBrush iconBrush(
+			hovered
+			? Gdiplus::Color(255, 255, 255, 255)
+			: Gdiplus::Color(235, 235, 235, 235)
+		);
+
+		// 图标尺寸
+		const float iconWidth = 12.0f;
+		const float iconHeight = 16.0f;
+		const float lineWidth = 2.0f;
+		const float gap = 3.0f;
+
+		const float totalWidth =
+			lineWidth + gap + iconWidth;
+
+		const float startX =
+			x + (w - totalWidth) / 2.0f;
+
+		const float startY =
+			y + (h - iconHeight) / 2.0f;
+
+		// 左侧竖线
+		g.FillRectangle(
+			&iconBrush,
+			startX,
+			startY,
+			lineWidth,
+			iconHeight
+		);
+
+		// ◀ 三角形
+		Gdiplus::PointF points[3];
+
+		const float triangleX =
+			startX + lineWidth + gap;
+
+		points[0] = Gdiplus::PointF(
+			triangleX + iconWidth,
+			startY
+		);
+
+		points[1] = Gdiplus::PointF(
+			triangleX + iconWidth,
+			startY + iconHeight
+		);
+
+		points[2] = Gdiplus::PointF(
+			triangleX,
+			startY + iconHeight / 2.0f
+		);
+
+		g.FillPolygon(
+			&iconBrush,
+			points,
+			3
+		);
+	}
+	void MainWindow::DrawNextButtonGdiplus(Gdiplus::Graphics& g,const Gdiplus::RectF& vRect,bool hovered)
+	{
+		const float x = vRect.X;
+		const float y = vRect.Y;
+		const float w = vRect.Width;
+		const float h = vRect.Height;
+
+		Gdiplus::SolidBrush iconBrush(
+			hovered
+			? Gdiplus::Color(255, 255, 255, 255)
+			: Gdiplus::Color(235, 235, 235, 235)
+		);
+
+		const float iconWidth = 12.0f;
+		const float iconHeight = 16.0f;
+		const float lineWidth = 2.0f;
+		const float gap = 3.0f;
+
+		const float totalWidth =
+			iconWidth + gap + lineWidth;
+
+		const float startX =
+			x + (w - totalWidth) / 2.0f;
+
+		const float startY =
+			y + (h - iconHeight) / 2.0f;
+
+		// ▶ 三角形
+		Gdiplus::PointF points[3];
+
+		points[0] = Gdiplus::PointF(
+			startX,
+			startY
+		);
+
+		points[1] = Gdiplus::PointF(
+			startX,
+			startY + iconHeight
+		);
+
+		points[2] = Gdiplus::PointF(
+			startX + iconWidth,
+			startY + iconHeight / 2.0f
+		);
+
+		g.FillPolygon(
+			&iconBrush,
+			points,
+			3
+		);
+
+		// 右侧竖线
+		const float lineX =
+			startX + iconWidth + gap;
+
+		g.FillRectangle(
+			&iconBrush,
+			lineX,
+			startY,
+			lineWidth,
+			iconHeight
+		);
+	}
+	void MainWindow::DrawPlaybackButtonsGdiplus(Gdiplus::Graphics& g,const Gdiplus::RectF& vRect,const Gdiplus::RectF& avatarRect)
+	{
+		const int clientW =
+			static_cast<int>(vRect.Width);
+
+		const int clientH =
+			static_cast<int>(vRect.Height);
+
+		// ============================
+		// 左侧封面区域
+		// ============================
+
+		const int leftMargin = 10;
+		const int avatarSize = 84;
+		const int avatarSpacing = 10;
+
+		const int reservedWidth =
+			leftMargin +
+			avatarSize +
+			avatarSpacing;
+
+		// ============================
+		// 按钮尺寸
+		// ============================
+
+		const int previousWidth = 32;
+		const int nextWidth = 32;
+
+		const int spacing = 16;
+
+		const int totalWidth =
+			previousWidth +
+			spacing +
+			nextWidth;
+
+		// ============================
+		// 剩余区域
+		// ============================
+
+		const int availableWidth =
+			clientW - reservedWidth;
+
+		// 整体居中 + 向左偏移 20px
+		const int startX =
+			reservedWidth +
+			(availableWidth - totalWidth) / 2 - 20;
+
+		// 垂直居中
+		const int centerY =
+			static_cast<int>(vRect.Y) +
+			(clientH / 2);
+
+		// ============================
+		// 上一曲区域
+		// ============================
+		const int centerX = startX - 16;
+		Gdiplus::RectF previousRect(
+			static_cast<float>(centerX),
+			static_cast<float>(centerY - 20),
+			static_cast<float>(previousWidth),
+			40.0f
+		);
+		// ============================
+		// 下一曲区域
+		// ============================
+		const int nextX =
+			spacing + startX + 46;
+
+		Gdiplus::RectF nextRect(
+			static_cast<float>(nextX),
+			static_cast<float>(centerY - 20),
+			static_cast<float>(nextWidth),
+			40.0f
+		);
+		// ============================
+		// 保存点击区域
+		// ============================
+		m_playbackButtonsInfo.previous.rect =
+			previousRect;
+		m_playbackButtonsInfo.next.rect =
+			nextRect;
+		// ============================
+		// 绘制
+		// ============================
+		DrawPreviousButtonGdiplus(
+			g,
+			previousRect,
+			m_playbackButtonsInfo.previous.hovered
+		);
+		DrawNextButtonGdiplus(
+			g,
+			nextRect,
+			m_playbackButtonsInfo.next.hovered
+		);
+	}
 	void MainWindow::DrawTrackInfoGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& cardRect, const Gdiplus::RectF& avatarRect)
 	{
 		// 在卡片右侧、头像旁边绘制歌名和歌手信息
@@ -1295,5 +1753,6 @@ namespace YuMediaPlayer
 		m_trackArtist = artist;
 		Composite();
 	}
+
 
 }

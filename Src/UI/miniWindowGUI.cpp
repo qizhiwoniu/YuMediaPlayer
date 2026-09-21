@@ -1,8 +1,13 @@
 #include "miniWindowGUI.h"
 #include "UI\WindowGUI.h"
 #include "TrayIcon.h"
+#include "Core/AudioPlayer.h"
+#include <algorithm>
+#include <cmath>
+
 namespace YuMediaPlayer
 {
+	WindowGUI* m_windowGUI = nullptr;
 	namespace
 	{
 		// 菜单项文字。字符串字面量是静态存储期，地址在整个程序运行期间
@@ -26,10 +31,22 @@ namespace YuMediaPlayer
 
 		constexpr int kCheckGutter = 20; // 给勾选标记留的左侧宽度，所有项统一预留，保证文字对齐
 
+		// 播放按钮相关常量
+		constexpr int kPlayButtonSize = 50;           // 按钮大小（像素）
+		constexpr int kPlayButtonPadding = 8;         // 按钮距离边缘的距离
+		constexpr COLORREF kPlayButtonColor = RGB(100, 200, 100);  // 绿色播放按钮
+		constexpr COLORREF kPlayButtonHoverColor = RGB(120, 220, 120);  // 悬停时的颜色
+		constexpr COLORREF kPlayButtonPlayingColor = RGB(200, 100, 100);  // 播放中时的颜色（红色停止按钮）
+		constexpr COLORREF kPlayButtonIconColor = RGB(255, 255, 255);  // 图标颜色（白色）
+
 		// 当前选中的循环模式，默认列表循环。点了子菜单里某一项之后会更新这里，
 		// 下次弹菜单时对应项会带勾选标记。
 		UINT s_currentLoopMode = ContextMenuCommand::LoopModeListLoop;
+		// 全局音频播放器实例
+		AudioPlayer* g_audioPlayer = nullptr;
 
+		// 播放按钮信息（缓存）
+		PlayButtonInfo g_playButtonInfo = {};
 		HBRUSH DarkMenuBackgroundBrush()
 		{
 			// 只创建一次，进程生命周期内复用，不需要每次弹菜单都新建/销毁。
@@ -45,13 +62,77 @@ namespace YuMediaPlayer
 				|| cmd == ContextMenuCommand::LoopModeHeart;
 		}
 	}
+	// 绘制播放图标（三角形）
+	void DrawPlayIcon(HDC hdc, int centerX, int centerY, int size, COLORREF color)
+	{
+		HBRUSH hBrush = CreateSolidBrush(color);
+		HPEN hPen = CreatePen(PS_NULL, 0, 0);
+		HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrush);
+		HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+
+		// 绘制向右指向的三角形
+		POINT points[3];
+		points[0] = { centerX - size / 3, centerY - size / 3 };  // 左上
+		points[1] = { centerX - size / 3, centerY + size / 3 };  // 左下
+		points[2] = { centerX + size / 2, centerY };              // 右
+
+		Polygon(hdc, points, 3);
+
+		SelectObject(hdc, hOldBrush);
+		SelectObject(hdc, hOldPen);
+		DeleteObject(hBrush);
+		DeleteObject(hPen);
+	}
+
+	// 绘制停止图标（正方形）
+	void DrawStopIcon(HDC hdc, int centerX, int centerY, int size, COLORREF color)
+	{
+		HBRUSH hBrush = CreateSolidBrush(color);
+		HPEN hPen = CreatePen(PS_NULL, 0, 0);
+		HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrush);
+		HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+
+		// 绘制正方形
+		int halfSize = size / 3;
+		RECT rect = {
+			centerX - halfSize,
+			centerY - halfSize,
+			centerX + halfSize,
+			centerY + halfSize
+		};
+		FillRect(hdc, &rect, hBrush);
+
+		SelectObject(hdc, hOldBrush);
+		SelectObject(hdc, hOldPen);
+		DeleteObject(hBrush);
+		DeleteObject(hPen);
+	}
+
+	// 绘制圆形按钮背景
+	void DrawCircleButton(HDC hdc, int x, int y, int radius, COLORREF bgColor)
+	{
+		// 创建椭圆刷子和笔
+		HBRUSH hBrush = CreateSolidBrush(bgColor);
+		HPEN hPen = CreatePen(PS_SOLID, 3, RGB(200, 200, 200));
+
+		HBRUSH hOldBrush = (HBRUSH)SelectObject(hdc, hBrush);
+		HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+
+		// 绘制圆形
+		Ellipse(hdc, x - radius, y - radius, x + radius, y + radius);
+
+		SelectObject(hdc, hOldBrush);
+		SelectObject(hdc, hOldPen);
+		DeleteObject(hBrush);
+		DeleteObject(hPen);
+	}
 
 	UINT GetCurrentLoopMode()
 	{
 		return s_currentLoopMode;
 	}
 
-	int ShowMiniPlayerContextMenu(HWND hwnd, POINT pt)
+	int ShowMiniPlayerContextMenu(HWND hwnd, POINT pt, YuMediaPlayer::WindowGUI* windowGUI)
 	{
 		// "循环模式"子菜单。挂到主菜单上之后系统会自动在"循环模式"这一项右边画箭头，
 		// 不需要自己画箭头。
@@ -126,7 +207,7 @@ namespace YuMediaPlayer
 		return cmd;
 	}
 
-	void HandleMiniPlayerContextMenuCommand(HWND hwnd, int cmd)
+	void HandleMiniPlayerContextMenuCommand(HWND hwnd, int cmd, YuMediaPlayer::WindowGUI* windowGUI)
 	{
 		switch (cmd)
 		{
@@ -136,36 +217,25 @@ namespace YuMediaPlayer
 
 		case ContextMenuCommand::MenuItem2:
 		{
-			OutputDebugStringW(L"[1] MenuItem2\n");
-
 			if (!m_windowGUI)
 			{
-				OutputDebugStringW(L"[2] m_windowGUI nullptr\n");
+				
 				break;
 			}
-
-			OutputDebugStringW(L"[3] m_windowGUI valid pointer\n");
 
 			HWND windowHwnd = m_windowGUI->GetHWND();
 
-			OutputDebugStringW(L"[4] GetHWND OK\n");
-
 			if (!::IsWindow(windowHwnd))
 			{
-				OutputDebugStringW(L"[5] HWND invalid\n");
 				break;
 			}
 
-			OutputDebugStringW(L"[6] HWND valid\n");
-
 			if (::IsWindowVisible(windowHwnd) && !::IsIconic(windowHwnd))
 			{
-				OutputDebugStringW(L"[7] Hide\n");
 				m_windowGUI->HideWindowGUI();
 			}
 			else
 			{
-				OutputDebugStringW(L"[8] Show\n");
 				m_windowGUI->ShowWindowGUI();
 			}
 
@@ -247,4 +317,149 @@ namespace YuMediaPlayer
 			DrawTextW(hdc, text, -1, &textRc, DT_SINGLELINE | DT_VCENTER | DT_LEFT);
 		}
 	}
+
+
+
+
+	// ===== 新增：播放按钮相关实现 =====
+		
+	void DrawPlayButton(HDC hdc, const PlayButtonInfo& buttonInfo)
+	{
+		// 计算按钮中心
+		int centerX = (buttonInfo.buttonRect.left + buttonInfo.buttonRect.right) / 2;
+		int centerY = (buttonInfo.buttonRect.top + buttonInfo.buttonRect.bottom) / 2;
+		int radius = (buttonInfo.buttonRect.right - buttonInfo.buttonRect.left) / 2;
+
+		// 选择按钮背景颜色
+		COLORREF bgColor = kPlayButtonColor;
+		if (buttonInfo.isHovered)
+		{
+			bgColor = kPlayButtonHoverColor;
+		}
+		if (buttonInfo.isPlaying)
+		{
+			bgColor = kPlayButtonPlayingColor;
+		}
+
+		// 绘制圆形按钮背景
+		DrawCircleButton(hdc, centerX, centerY, radius, bgColor);
+
+		// 绘制图标（播放或停止）
+		if (buttonInfo.isPlaying)
+		{
+			DrawStopIcon(hdc, centerX, centerY, radius - 5, kPlayButtonIconColor);
+		}
+		else
+		{
+			DrawPlayIcon(hdc, centerX, centerY, radius - 5, kPlayButtonIconColor);
+		}
+	}
+
+	PlayButtonInfo CalculatePlayButtonRect(int baseX, int baseY, int buttonSize)
+	{
+		PlayButtonInfo info = {};
+		info.buttonRect.left = baseX + kPlayButtonPadding;
+		info.buttonRect.top = baseY + kPlayButtonPadding;
+		info.buttonRect.right = info.buttonRect.left + buttonSize;
+		info.buttonRect.bottom = info.buttonRect.top + buttonSize;
+		return info;
+	}
+
+	bool IsPointInPlayButton(POINT pt, const PlayButtonInfo& buttonInfo)
+	{
+		// 计算按钮中心和半径
+		int centerX = (buttonInfo.buttonRect.left + buttonInfo.buttonRect.right) / 2;
+		int centerY = (buttonInfo.buttonRect.top + buttonInfo.buttonRect.bottom) / 2;
+		int radius = (buttonInfo.buttonRect.right - buttonInfo.buttonRect.left) / 2;
+
+		// 计算点到圆心的距离
+		int dx = pt.x - centerX;
+		int dy = pt.y - centerY;
+		int distanceSquared = dx * dx + dy * dy;
+		int radiusSquared = radius * radius;
+
+		return distanceSquared <= radiusSquared;
+	}
+
+	bool InitializeAudioPlayer()
+	{
+		if (g_audioPlayer != nullptr)
+			return true;
+
+		g_audioPlayer = new AudioPlayer();
+		if (!g_audioPlayer->Initialize())
+		{
+			delete g_audioPlayer;
+			g_audioPlayer = nullptr;
+			OutputDebugStringW(L"Failed to initialize audio player\n");
+			return false;
+		}
+
+		OutputDebugStringW(L"Audio player initialized successfully\n");
+		return true;
+	}
+
+	void CleanupAudioPlayer()
+	{
+		if (g_audioPlayer != nullptr)
+		{
+			delete g_audioPlayer;
+			g_audioPlayer = nullptr;
+		}
+	}
+
+	void HandlePlayButtonClick(HWND hwnd, const std::wstring& mp3FilePath)
+	{
+		if (g_audioPlayer == nullptr)
+		{
+			OutputDebugStringW(L"Audio player not initialized\n");
+			return;
+		}
+
+		if (g_audioPlayer->GetPlaybackState() == PlaybackState::Playing)
+		{
+			// 正在播放，暂停
+			g_audioPlayer->Pause();
+		}
+		else if (g_audioPlayer->GetPlaybackState() == PlaybackState::Paused)
+		{
+			// 暂停中，继续播放
+			g_audioPlayer->Resume();
+		}
+		else
+		{
+			// 停止状态，播放新文件
+			if (!g_audioPlayer->Play(mp3FilePath))
+			{
+				OutputDebugStringW(L"Failed to play audio file\n");
+			}
+		}
+
+		// 重绘窗口以更新按钮状态
+		InvalidateRect(hwnd, &g_playButtonInfo.buttonRect, FALSE);
+	}
+
+	void TogglePlayPause(HWND hwnd)
+	{
+		if (g_audioPlayer == nullptr)
+			return;
+
+		if (g_audioPlayer->GetPlaybackState() == PlaybackState::Playing)
+		{
+			g_audioPlayer->Pause();
+		}
+		else
+		{
+			g_audioPlayer->Resume();
+		}
+
+		// 重绘按钮
+		InvalidateRect(hwnd, &g_playButtonInfo.buttonRect, FALSE);
+	}
+
+	AudioPlayer* GetAudioPlayer()
+	{
+		return g_audioPlayer;
+	}
+
 }

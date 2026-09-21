@@ -2,9 +2,17 @@
 #include <windows.h>
 #include <windowsx.h>
 #include "WindowGUI.h"
+#include "Core/AudioPlayer.h"
 
 namespace YuMediaPlayer
 {
+	// 播放按钮状态和位置信息
+	struct PlayButtonInfo
+	{
+		RECT buttonRect;           // 按钮矩形区域
+		bool isPlaying = false;    // 是否正在播放
+		bool isHovered = false;    // 鼠标是否悬停在按钮上
+	};
 	// 右键菜单的命令 ID，MainWindow 根据 ShowMiniPlayerContextMenu 的返回值
 	// 判断用户点了哪一项。
 	namespace ContextMenuCommand
@@ -22,31 +30,42 @@ namespace YuMediaPlayer
 		constexpr UINT LoopModeHeart = 2004;      // 心动循环
 	}
 
-	// 弹出 mini 播放器的右键菜单（内含"循环模式"子菜单，会自动带箭头）。
-	// pt 必须是屏幕坐标（WM_CONTEXTMENU / WM_NCRBUTTONUP 的 lParam 本身就是屏幕坐标，
-	// 直接用 GET_X_LPARAM/GET_Y_LPARAM 取出来传进来即可，不需要 ClientToScreen）。
-	// 返回被选中的命令 ID（见 ContextMenuCommand），用户点了菜单外区域取消则返回 0。
-	// 如果选中的是循环模式子菜单里的某一项，内部会记住这个选择，
-	// 下次再弹菜单时该项会带勾选标记，可以用 GetCurrentLoopMode() 查询当前是哪个模式。
-	int ShowMiniPlayerContextMenu(HWND hwnd, POINT pt);
-	void HandleMiniPlayerContextMenuCommand(HWND hwnd, int cmd);
-	// 当前选中的循环模式（ContextMenuCommand::LoopMode* 系列值之一），
-	// 默认是 LoopModeListLoop。真正切歌逻辑可以用这个来判断下一首怎么选。
 	UINT GetCurrentLoopMode();
 
-	// 菜单是黑色背景（自绘/owner-draw），需要拥有者窗口（也就是传给
-	// ShowMiniPlayerContextMenu 的 hwnd 所在的 WndProc/EventProc）把
-	// WM_MEASUREITEM 和 WM_DRAWITEM 转发到这两个函数，菜单才画得出来。
-	// 子菜单（循环模式）里的项也是同一套机制，不需要额外处理。
-	// 例如：
-	//   case WM_MEASUREITEM:
-	//       MeasureMiniPlayerMenuItem(*reinterpret_cast<MEASUREITEMSTRUCT*>(lParam));
-	//       return TRUE;
-	//   case WM_DRAWITEM:
-	//       DrawMiniPlayerMenuItem(*reinterpret_cast<const DRAWITEMSTRUCT*>(lParam));
-	//       return TRUE;
 	void MeasureMiniPlayerMenuItem(MEASUREITEMSTRUCT& mis);
 	void DrawMiniPlayerMenuItem(const DRAWITEMSTRUCT& dis);
 
-	YuMediaPlayer::WindowGUI* m_windowGUI;
+	//extern YuMediaPlayer::WindowGUI* m_windowGUI;
+
+	// 显示迷你播放器上下文菜单
+	int ShowMiniPlayerContextMenu(HWND hwnd, POINT pt, YuMediaPlayer::WindowGUI* windowGUI = nullptr);
+	void HandleMiniPlayerContextMenuCommand(HWND hwnd, int cmd, YuMediaPlayer::WindowGUI* windowGUI = nullptr);
+
+	// ===== 新增：播放按钮相关函数 =====
+
+	// 在给定的 HDC 上绘制播放按钮
+	void DrawPlayButton(HDC hdc, const PlayButtonInfo& buttonInfo);
+
+	// 计算播放按钮的矩形区域
+	// baseX, baseY 是参考点（通常是窗口客户区左上角）
+	// buttonSize 是按钮大小（宽度和高度相同）
+	PlayButtonInfo CalculatePlayButtonRect(int baseX, int baseY, int buttonSize);
+
+	// 检查点是否在播放按钮内
+	bool IsPointInPlayButton(POINT pt, const PlayButtonInfo& buttonInfo);
+
+	// 初始化音频播放器（在主窗口初始化时调用）
+	bool InitializeAudioPlayer();
+
+	// 清理音频播放器资源
+	void CleanupAudioPlayer();
+
+	// 处理播放按钮点击
+	void HandlePlayButtonClick(HWND hwnd, const std::wstring& mp3FilePath);
+
+	// 切换播放/暂停状态
+	void TogglePlayPause(HWND hwnd);
+
+	// 获取全局音频播放器实例
+	AudioPlayer* GetAudioPlayer();
 }

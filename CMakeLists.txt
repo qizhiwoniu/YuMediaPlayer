@@ -18,7 +18,7 @@ option(USE_WIN32 "Use Win32 GUI subsystem" ON)
     add_executable(YuMediaPlayer WIN32 ${SRC})
     target_compile_definitions(YuMediaPlayer PRIVATE USE_WIN32)
 #else()
-#     add_executable(YuMediaPlayer ${SRC} "Src/NotifyIcon/TrayIcon.cpp" "Src/NotifyIcon/TrayIcon.h")
+#    add_executable(YuMediaPlayer ${SRC})
 #endif()  
 
 target_include_directories(YuMediaPlayer PRIVATE
@@ -30,7 +30,13 @@ target_include_directories(YuMediaPlayer PRIVATE
     "${CMAKE_SOURCE_DIR}/ThirdParty"
 )
 
-target_link_libraries(YuMediaPlayer) 
+target_link_libraries(YuMediaPlayer PRIVATE
+    mfplat.lib
+    mfreadwrite.lib
+    mfuuid.lib
+    wmcodecdspuuid.lib
+    dwmapi.lib
+) 
 
 set_target_properties(YuMediaPlayer PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY         "${CMAKE_BINARY_DIR}/YuMediaPlayer"

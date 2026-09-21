@@ -39,7 +39,24 @@ namespace YuMediaPlayer
 		bool EnsureLayeredBitmap(int width, int height);
 		// 在卡片右侧、头像旁边画歌名/歌手文字
 		void DrawTrackInfoGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& cardRect, const Gdiplus::RectF& avatarRect);
+		
+		struct ControlButtonInfo
+		{
+			Gdiplus::RectF rect;
+			bool hovered = false;
+		};
 
+		struct PlaybackButtonsInfo
+		{
+			ControlButtonInfo previous;
+			ControlButtonInfo play;
+			ControlButtonInfo next;
+		};
+		void DrawPlayButtonGdiplus(Gdiplus::Graphics& g,const Gdiplus::RectF& vRect,bool isPlaying,bool hovered);
+		void DrawPreviousButtonGdiplus(Gdiplus::Graphics& g,const Gdiplus::RectF& vRect,bool hovered);
+		void DrawNextButtonGdiplus(Gdiplus::Graphics& g,const Gdiplus::RectF& vRect,bool hovered);
+		void DrawPlaybackButtonsGdiplus(Gdiplus::Graphics& g,const Gdiplus::RectF& vRect,const Gdiplus::RectF& avatarRect);
+		PlaybackButtonsInfo m_playbackButtonsInfo;
 	private:
 		static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 		LRESULT EventProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
