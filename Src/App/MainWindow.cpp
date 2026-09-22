@@ -13,24 +13,19 @@
 
 namespace YuMediaPlayer
 {
-	// 全局播放按钮信息（需要声明在命名空间中）
 	PlayButtonInfo g_playButtonInfo = {};
-
-	// 当前正在播放的文件路径（用于暂停/继续播放）
 	std::wstring g_currentMp3Path = L"";
 
 	MainWindow::MainWindow()
-		: m_hwnd(0)
+		: m_hwnd(nullptr)
 		, m_theme()
 		, m_trayIcon(GetModuleHandle(nullptr), L"余余音乐播放器")
 		, m_windowGUI(nullptr)
 	{}
-
 	MainWindow::~MainWindow()
 	{
 		CleanupAudioPlayer();  // <<<新增
 	}
-
 	bool MainWindow::Initialize(const wchar_t* title, int width, int height)
 	{
 		if (!InitWindow(title, width, height))
@@ -57,9 +52,14 @@ namespace YuMediaPlayer
 
 		Composite();
 		m_windowGUI->HideWindowGUI();
+
+		m_edgeHoverTimer = SetTimer(m_hwnd, 1001, 100, nullptr);
+		if (m_edgeHoverTimer == 0)
+			return false;
+		
+		UpdateWindow(m_hwnd);
 		return true; 
 	}
-
 	bool MainWindow::InitWindow(const wchar_t* title, int width, int height)
 	{
 		// 1. 注册窗口类
@@ -107,16 +107,9 @@ namespace YuMediaPlayer
 
 		// 4. 显示窗口
 		ShowWindow(m_hwnd, SW_SHOW);
-		UpdateWindow(m_hwnd);
-
-		// 5. 设置定时器用于边缘吸附检测和自动收起
-		m_edgeHoverTimer = SetTimer(m_hwnd, 1001, 100, nullptr);
-		if (m_edgeHoverTimer == 0)
-			return false;
 
 		return true;
 	}
-
 	void MainWindow::Run()
 	{
 		MSG msg = {};
@@ -331,7 +324,20 @@ namespace YuMediaPlayer
 				TogglePlayPause(hwnd);
 				return 0;
 			}
-			
+			// ✅ 检测上一曲按钮点击
+			if (IsPointInRect(pt, m_playbackButtonsInfo.previous.rect))
+			{
+				HandlePreviousButtonClick(hwnd);
+				return 0;
+			}
+
+			// ✅ 检测下一曲按钮点击
+			if (IsPointInRect(pt, m_playbackButtonsInfo.next.rect))
+			{
+				HandleNextButtonClick(hwnd);
+				return 0;
+			}
+
 			return 0;
 		}
 		case WM_MOUSEMOVE:
@@ -348,21 +354,60 @@ namespace YuMediaPlayer
 			pt.x = GET_X_LPARAM(lParam);
 			pt.y = GET_Y_LPARAM(lParam);
 
-			// ✅ 检测是否悬停在播放按钮上
-			bool wasHovered = g_playButtonInfo.isHovered;
+			// ✅ 检测播放按钮悬停状态
+			bool wasPlayHovered = g_playButtonInfo.isHovered;
 			g_playButtonInfo.isHovered = IsPointInPlayButton(pt, g_playButtonInfo);
 
-			// 如果悬停状态改变，重新绘制按钮区域
-			if (wasHovered != g_playButtonInfo.isHovered)
+			// ✅ 检测上一曲按钮悬停状态
+			bool wasPreviousHovered = m_playbackButtonsInfo.previous.hovered;
+			m_playbackButtonsInfo.previous.hovered = IsPointInRect(pt, m_playbackButtonsInfo.previous.rect);
+
+			// ✅ 检测下一曲按钮悬停状态
+			bool wasNextHovered = m_playbackButtonsInfo.next.hovered;
+			m_playbackButtonsInfo.next.hovered = IsPointInRect(pt, m_playbackButtonsInfo.next.rect);
+			// ===== 控制按钮 =====
+			bool wasCloseHovered = m_playbackButtonsInfo.close.hovered;
+			m_playbackButtonsInfo.close.hovered = IsPointInRect(pt, m_playbackButtonsInfo.close.rect);
+
+			bool wasMiniHovered = m_playbackButtonsInfo.mini.hovered;
+			m_playbackButtonsInfo.mini.hovered = IsPointInRect(pt, m_playbackButtonsInfo.mini.rect);
+
+			bool wasHeartHovered = m_playbackButtonsInfo.heart.hovered;
+			m_playbackButtonsInfo.heart.hovered = IsPointInRect(pt, m_playbackButtonsInfo.heart.rect);
+
+			bool wasSoundHovered = m_playbackButtonsInfo.sound.hovered;
+			m_playbackButtonsInfo.sound.hovered = IsPointInRect(pt, m_playbackButtonsInfo.sound.rect);
+
+			bool wasListHovered = m_playbackButtonsInfo.list.hovered;
+			m_playbackButtonsInfo.list.hovered = IsPointInRect(pt, m_playbackButtonsInfo.list.rect);
+			// 如果任何按钮的悬停状态改变，重新绘制
+			if (wasPlayHovered != g_playButtonInfo.isHovered ||
+				wasPreviousHovered != m_playbackButtonsInfo.previous.hovered ||
+				wasNextHovered != m_playbackButtonsInfo.next.hovered ||
+				wasCloseHovered != m_playbackButtonsInfo.close.hovered ||
+				wasMiniHovered != m_playbackButtonsInfo.mini.hovered ||
+				wasHeartHovered != m_playbackButtonsInfo.heart.hovered ||
+				wasSoundHovered != m_playbackButtonsInfo.sound.hovered ||
+				wasListHovered != m_playbackButtonsInfo.list.hovered)
 			{
-				InvalidateRect(hwnd, &g_playButtonInfo.buttonRect, FALSE);
+				Composite();
 			}
-			g_playButtonInfo.isHovered = IsPointInPlayButton(pt, g_playButtonInfo);
-			if (g_playButtonInfo.isHovered)
-				InvalidateRect(hwnd, &g_playButtonInfo.buttonRect, FALSE);
-			
+
 			return 0;
 		}
+		break;
+
+			//// 如果悬停状态改变，重新绘制按钮区域
+			//if (wasHovered != g_playButtonInfo.isHovered)
+			//{
+			//	InvalidateRect(hwnd, &g_playButtonInfo.buttonRect, FALSE);
+			//}
+			//g_playButtonInfo.isHovered = IsPointInPlayButton(pt, g_playButtonInfo);
+			//if (g_playButtonInfo.isHovered)
+			//	InvalidateRect(hwnd, &g_playButtonInfo.buttonRect, FALSE);
+			//
+			//return 0;
+		
 		case WM_NCHITTEST:
 		{
 			const LONG border = 6; 
@@ -459,7 +504,6 @@ namespace YuMediaPlayer
 		// 启动动画定时器 (16ms ≈ 60fps)
 		m_animationTimer = SetTimer(m_hwnd, 2001, 16, nullptr);
 	}
-
 	void MainWindow::StartExpandAnimation()
 	{
 		if (m_isAnimating || !m_isCollapsed)
@@ -477,7 +521,6 @@ namespace YuMediaPlayer
 		// 启动动画定时器
 		m_animationTimer = SetTimer(m_hwnd, 2001, 16, nullptr);
 	}
-
 	void MainWindow::UpdateCollapseAnimation()
 	{
 		if (!m_isAnimating)
@@ -600,7 +643,6 @@ namespace YuMediaPlayer
 
 		Composite();
 	}
-
 	void MainWindow::CheckAutoCollapse()
 	{
 		if (m_isCollapsed || m_isMoving || m_isAnimating)
@@ -626,7 +668,6 @@ namespace YuMediaPlayer
 
 		CheckAndCollapseAtEdge();
 	}
-
 	void MainWindow::CheckCollapsedMouseHover()
 	{
 		if (!m_isCollapsed || m_isMoving)
@@ -699,7 +740,6 @@ namespace YuMediaPlayer
 			}
 		}
 	}
-
 	void MainWindow::CheckAndCollapseAtEdge()
 	{
 		if (m_isCollapsed)
@@ -709,7 +749,6 @@ namespace YuMediaPlayer
 		GetWindowRect(m_hwnd, &wr);
 		CollapseAtEdgeRect(wr);
 	}
-
 	void MainWindow::CollapseAtEdgeRect(const RECT& wr)
 	{
 		if (m_isCollapsed || m_isAnimating)
@@ -786,7 +825,6 @@ namespace YuMediaPlayer
 			Composite();
 		}
 	}
-
 	bool MainWindow::EnsureLayeredBitmap(int width, int height)
 	{
 		// 如果已有合适大小的位图，直接复用
@@ -1567,99 +1605,450 @@ namespace YuMediaPlayer
 	}
 	void MainWindow::DrawPlaybackButtonsGdiplus(Gdiplus::Graphics& g,const Gdiplus::RectF& vRect,const Gdiplus::RectF& avatarRect)
 	{
-		const int clientW =
-			static_cast<int>(vRect.Width);
-
-		const int clientH =
-			static_cast<int>(vRect.Height);
+		const int clientW = static_cast<int>(vRect.Width);
+		const int clientH = static_cast<int>(vRect.Height);
 
 		// ============================
 		// 左侧封面区域
 		// ============================
-
 		const int leftMargin = 10;
 		const int avatarSize = 84;
 		const int avatarSpacing = 10;
 
-		const int reservedWidth =
-			leftMargin +
-			avatarSize +
-			avatarSpacing;
+		const int reservedWidth = leftMargin + avatarSize + avatarSpacing;
 
 		// ============================
 		// 按钮尺寸
 		// ============================
+		const int buttonWidth = 40;   // 增大按钮宽度便于点击
+		const int buttonHeight = 40;
+		const int spacing = 20;       // 按钮之间的间距
 
-		const int previousWidth = 32;
-		const int nextWidth = 32;
-
-		const int spacing = 16;
-
-		const int totalWidth =
-			previousWidth +
-			spacing +
-			nextWidth;
+		const int totalWidth = buttonWidth + spacing + buttonWidth;
 
 		// ============================
 		// 剩余区域
 		// ============================
+		const int availableWidth = clientW - reservedWidth;
 
-		const int availableWidth =
-			clientW - reservedWidth;
-
-		// 整体居中 + 向左偏移 20px
-		const int startX =
-			reservedWidth +
-			(availableWidth - totalWidth) / 2 - 20;
+		// 按钮组居中 + 向左偏移 40px
+		const int startX = reservedWidth + (availableWidth - totalWidth) / 2 - 20;
 
 		// 垂直居中
-		const int centerY =
-			static_cast<int>(vRect.Y) +
-			(clientH / 2);
+		const int centerY = static_cast<int>(vRect.Y) + (clientH / 2);
 
 		// ============================
-		// 上一曲区域
+		// 上一曲按钮区域
 		// ============================
-		const int centerX = startX - 16;
 		Gdiplus::RectF previousRect(
-			static_cast<float>(centerX),
-			static_cast<float>(centerY - 20),
-			static_cast<float>(previousWidth),
-			40.0f
+			static_cast<float>(startX),
+			static_cast<float>(centerY - buttonHeight / 2),
+			static_cast<float>(buttonWidth),
+			static_cast<float>(buttonHeight)
 		);
-		// ============================
-		// 下一曲区域
-		// ============================
-		const int nextX =
-			spacing + startX + 46;
 
+		// ============================
+		// 下一曲按钮区域
+		// ============================
 		Gdiplus::RectF nextRect(
-			static_cast<float>(nextX),
-			static_cast<float>(centerY - 20),
-			static_cast<float>(nextWidth),
-			40.0f
+			static_cast<float>(startX + buttonWidth + spacing),
+			static_cast<float>(centerY - buttonHeight / 2),
+			static_cast<float>(buttonWidth),
+			static_cast<float>(buttonHeight)
 		);
-		// ============================
+		// 右上角按钮 (关闭、最小化) 
+		const int topRightMargin = 0;
+		//const int topMargin = 1;
+		//const int rightMargin = 1;
+		const int buttonSize = 20;
+		const int buttonSpacing = 2;
+
+		// 关闭按钮 (右上角)
+		Gdiplus::RectF closeRect(
+			static_cast<float>(clientW - topRightMargin - buttonSize),
+			static_cast<float>(topRightMargin + buttonSize),
+			static_cast<float>(buttonSize),
+			static_cast<float>(buttonSize)
+		);
+		// 最小化按钮 (关闭按钮下面)
+		Gdiplus::RectF miniRect(
+			static_cast<float>(clientW - topRightMargin - buttonSize),
+			static_cast<float>(topRightMargin + buttonSize + buttonSpacing),
+			static_cast<float>(buttonSize),
+			static_cast<float>(buttonSize)
+		);
+		// 右侧按钮 (音量、列表) 
+		//const int rightMargin = 15;
+		const float nextButtonRight = nextRect.GetRight(); // 假设下一曲按钮的位置
+		// 音量按钮
+		Gdiplus::RectF soundRect(
+			static_cast<float>(clientW - topRightMargin - buttonSize * 3),
+			static_cast<float>(clientH / 2 - buttonSize / 2),
+			static_cast<float>(buttonSize),
+			static_cast<float>(buttonSize)
+		);
+		// 列表按钮
+		Gdiplus::RectF listRect(
+			static_cast<float>(clientW - topRightMargin - buttonSize * 2),
+			static_cast<float>(clientH / 2 - buttonSize / 2),
+			static_cast<float>(buttonSize),
+			static_cast<float>(buttonSize)
+		);
+		// 左侧按钮 (收藏) 
+		Gdiplus::RectF heartRect(
+			static_cast<float>(leftMargin),
+			static_cast<float>(clientH / 2 - buttonSize / 2),
+			static_cast<float>(buttonSize),
+			static_cast<float>(buttonSize)
+		);
 		// 保存点击区域
-		// ============================
-		m_playbackButtonsInfo.previous.rect =
-			previousRect;
-		m_playbackButtonsInfo.next.rect =
-			nextRect;
-		// ============================
-		// 绘制
-		// ============================
-		DrawPreviousButtonGdiplus(
-			g,
-			previousRect,
-			m_playbackButtonsInfo.previous.hovered
+		m_playbackButtonsInfo.heart.rect = heartRect;
+		m_playbackButtonsInfo.sound.rect = soundRect;
+		m_playbackButtonsInfo.list.rect = listRect;
+		m_playbackButtonsInfo.close.rect = closeRect;
+		m_playbackButtonsInfo.mini.rect = miniRect;
+		m_playbackButtonsInfo.previous.rect = previousRect;
+		m_playbackButtonsInfo.next.rect = nextRect;
+		DrawHeartButtonGdiplus(g, heartRect, m_playbackButtonsInfo.heart.hovered);
+		DrawSoundButtonGdiplus(g, soundRect, m_playbackButtonsInfo.sound.hovered);
+		DrawListButtonGdiplus(g, listRect, m_playbackButtonsInfo.list.hovered);
+		DrawCloseButtonGdiplus(g, closeRect, m_playbackButtonsInfo.close.hovered);
+		DrawMiniButtonGdiplus(g, miniRect, m_playbackButtonsInfo.mini.hovered);
+		DrawPreviousButtonGdiplus(g,previousRect,m_playbackButtonsInfo.previous.hovered);
+		DrawNextButtonGdiplus(g,nextRect,m_playbackButtonsInfo.next.hovered);
+	}
+
+	
+	void MainWindow::DrawCloseButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered)
+	{
+		const float x = vRect.X;
+		const float y = vRect.Y;
+		const float w = vRect.Width;
+		const float h = vRect.Height;
+
+		// 根据悬停状态选择颜色
+		Gdiplus::SolidBrush iconBrush(
+			hovered
+			? Gdiplus::Color(255, 255, 100, 100)  // 悬停时：红色
+			: Gdiplus::Color(235, 235, 235, 235)  // 正常时：浅灰色
 		);
-		DrawNextButtonGdiplus(
-			g,
-			nextRect,
-			m_playbackButtonsInfo.next.hovered
+
+		// 图标尺寸
+		const float iconSize = 10.0f;
+		const float lineWidth = 2.0f;
+
+		const float startX = x + (w - iconSize);
+		const float startY = y;
+		const float endX = startX + iconSize;
+		const float endY = startY + iconSize;
+
+		// 绘制 X 符号（两条斜线）
+		Gdiplus::Pen linePen(&iconBrush, lineWidth);
+		linePen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
+
+		// 左上到右下的斜线
+		g.DrawLine(&linePen, startX, startY, endX, endY);
+
+		// 右上到左下的斜线
+		g.DrawLine(&linePen, endX, startY, startX, endY);
+		
+	}
+	void MainWindow::DrawMiniButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered)
+	{
+		const float x = vRect.X;
+		const float y = vRect.Y;
+		const float w = vRect.Width;
+		const float h = vRect.Height;
+
+		// 根据悬停状态选择颜色
+		Gdiplus::Color iconColor(
+			hovered
+			? Gdiplus::Color(255, 0, 100, 200)	  // 悬停时：蓝色
+			: Gdiplus::Color(235, 235, 235, 235)  // 正常时：浅灰色
+		);
+
+		// 创建画笔用于绘制框线
+		Gdiplus::Pen iconPen(iconColor, 2.0f);	// 笔宽 2.0f
+		// 矩形框尺寸
+		const int buttonspacing = 3;
+		const float boxWidth = 12.0f;
+		const float boxHeight = 10.0f;
+		const float startX = x + (w - boxWidth);
+		const float startY = y + (h - boxHeight) + buttonspacing;
+
+		// 绘制矩形框
+		g.DrawRectangle(
+			&iconPen,
+			startX,
+			startY,
+			boxWidth,
+			boxHeight
 		);
 	}
+	void MainWindow::DrawSoundButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered)
+	{
+		const float x = vRect.X;
+		const float y = vRect.Y;
+		const float w = vRect.Width;
+		const float h = vRect.Height;
+
+		// 根据悬停状态选择颜色
+		Gdiplus::SolidBrush iconBrush(
+			hovered
+			? Gdiplus::Color(255, 255, 255, 255)  // 悬停时：白色
+			: Gdiplus::Color(235, 235, 235, 235)  // 正常时：浅灰色
+		);
+
+		// 喇叭图标尺寸
+		const float speakerWidth = 6.0f;
+		const float speakerHeight = 8.0f;
+		const float waveWidth = 3.0f;
+
+		const float centerX = x + w / 2.0f;
+		const float centerY = y + h / 2.0f;
+
+		// 绘制喇叭主体（三角形）
+		Gdiplus::PointF speakerPoints[3];
+		speakerPoints[0] = Gdiplus::PointF(centerX - speakerWidth / 2.0f, centerY - speakerHeight / 2.0f);
+		speakerPoints[1] = Gdiplus::PointF(centerX - speakerWidth / 2.0f, centerY + speakerHeight / 2.0f);
+		speakerPoints[2] = Gdiplus::PointF(centerX + speakerWidth / 2.0f, centerY);
+
+		g.FillPolygon(&iconBrush, speakerPoints, 3);
+
+		// 绘制音波纹（可选，表示有声音）
+		Gdiplus::Pen wavePen(&iconBrush, 1.0f);
+		const float waveRadius1 = speakerWidth / 2.0f + 2.0f;
+		const float waveRadius2 = speakerWidth / 2.0f + 4.0f;
+
+		// 第一道音波
+		g.DrawArc(&wavePen,
+			centerX + speakerWidth / 2.0f - waveRadius1,
+			centerY - waveRadius1,
+			waveRadius1 * 2.0f,
+			waveRadius1 * 2.0f,
+			-45.0f, 90.0f);
+
+		// 第二道音波
+		g.DrawArc(&wavePen,
+			centerX + speakerWidth / 2.0f - waveRadius2,
+			centerY - waveRadius2,
+			waveRadius2 * 2.0f,
+			waveRadius2 * 2.0f,
+			-45.0f, 90.0f);
+
+	}
+	void MainWindow::DrawListButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered)
+	{
+		const float x = vRect.X;
+		const float y = vRect.Y;
+		const float w = vRect.Width;
+		const float h = vRect.Height;
+
+		// 根据悬停状态选择颜色
+		Gdiplus::SolidBrush iconBrush(
+			hovered
+			? Gdiplus::Color(255, 255, 255, 255)  // 悬停时：白色
+			: Gdiplus::Color(235, 235, 235, 235)  // 正常时：浅灰色
+		);
+
+		// 列表图标尺寸
+		const float lineWidth = 10.0f;
+		const float lineHeight = 2.0f;
+		const float spacing = 2.0f;
+
+		const float startX = x + (w - lineWidth) / 2.0f;
+		const float startY = y + (h - (lineHeight * 3 + spacing * 2)) / 2.0f;
+
+		// 绘制三条横线（代表列表）
+		for (int i = 0; i < 3; i++)
+		{
+			const float currentY = startY + i * (lineHeight + spacing);
+			g.FillRectangle(&iconBrush, startX, currentY, lineWidth, lineHeight);
+		}
+
+		// 绘制音符装饰（可选）
+		const float noteSize = 2.0f;
+		const float noteX = startX + lineWidth + 2.0f;
+		const float noteY = startY + lineHeight;
+
+		Gdiplus::SolidBrush noteBrush(
+			hovered
+			? Gdiplus::Color(200, 255, 255, 255)
+			: Gdiplus::Color(180, 235, 235, 235)
+		);
+
+		// 绘制小圆点作为装饰
+		g.FillEllipse(&noteBrush, noteX, noteY, noteSize, noteSize);
+
+	}
+	void MainWindow::DrawHeartButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered)
+	{
+		const float x = vRect.X;
+		const float y = vRect.Y;
+		const float w = vRect.Width;
+		const float h = vRect.Height;
+
+		// 根据悬停状态选择颜色（心形可以根据是否收藏改变颜色）
+		Gdiplus::SolidBrush iconBrush(
+			hovered
+			? Gdiplus::Color(255, 255, 100, 100)  // 悬停时：红色
+			: Gdiplus::Color(235, 235, 235, 235)  // 正常时：浅灰色
+		);
+
+		// 心形图标尺寸
+		const float heartSize = 8.0f;
+		const float centerX = x + w / 2.0f;
+		const float centerY = y + h / 2.0f;
+
+		// 绘制心形（使用多边形近似）
+		// 心形的上半部分（两个圆角方块）和下半部分（三角形）
+		Gdiplus::PointF heartPoints[10];
+
+		// 左上圆弧对应的点
+		heartPoints[0] = Gdiplus::PointF(centerX - heartSize / 2.0f, centerY - heartSize / 4.0f);
+		heartPoints[1] = Gdiplus::PointF(centerX - heartSize / 2.0f - 1.0f, centerY - heartSize / 2.0f);
+		heartPoints[2] = Gdiplus::PointF(centerX - heartSize / 4.0f, centerY - heartSize / 2.0f - 1.0f);
+
+		// 右上圆弧对应的点
+		heartPoints[3] = Gdiplus::PointF(centerX + heartSize / 4.0f, centerY - heartSize / 2.0f - 1.0f);
+		heartPoints[4] = Gdiplus::PointF(centerX + heartSize / 2.0f + 1.0f, centerY - heartSize / 2.0f);
+		heartPoints[5] = Gdiplus::PointF(centerX + heartSize / 2.0f, centerY - heartSize / 4.0f);
+
+		// 右边的尖端
+		heartPoints[6] = Gdiplus::PointF(centerX + heartSize / 3.0f, centerY + heartSize / 4.0f);
+
+		// 底部尖端
+		heartPoints[7] = Gdiplus::PointF(centerX, centerY + heartSize / 2.0f);
+
+		// 左边的尖端
+		heartPoints[8] = Gdiplus::PointF(centerX - heartSize / 3.0f, centerY + heartSize / 4.0f);
+
+		// 闭合点
+		heartPoints[9] = heartPoints[0];
+
+		// 绘制心形
+		g.FillPolygon(&iconBrush, heartPoints, 9);
+
+		// 如果需要只显示轮廓（未收藏状态）
+		Gdiplus::Pen heartPen(&iconBrush, 1.0f);
+		if (!hovered)  // 非悬停时显示轮廓
+		{
+			g.DrawPolygon(&heartPen, heartPoints, 9);
+		}
+
+	}
+	void MainWindow::HandleCloseButtonClick(HWND hwnd)
+	{
+		OutputDebugStringW(L"[Button Click] Close\n");
+
+		// 关闭程序
+		SendMessage(hwnd, WM_CLOSE, 0, 0);
+	}
+	void MainWindow::HandleMiniButtonClick(HWND hwnd)
+	{
+		OutputDebugStringW(L"[Button Click] Minimize\n");
+
+		// 隐藏窗口，显示主窗口 GUI
+		if (m_windowGUI)
+		{
+			ShowWindow(hwnd, SW_HIDE);
+			m_windowGUI->ShowWindowGUI();
+		}
+	}
+	void MainWindow::HandleHeartButtonClick(HWND hwnd)
+	{
+		OutputDebugStringW(L"[Button Click] Heart (Favorite)\n");
+
+		// TODO: 实现收藏功能
+		// 1. 切换收藏状态
+		// 2. 保存收藏到文件或数据库
+		// 3. 更新 UI（心形从空心变实心或反之）
+		// 4. 可以播放收藏成功的音效
+
+		/*
+		示例实现：
+		static bool isFavorited = false;
+		isFavorited = !isFavorited;
+
+		if (isFavorited)
+		{
+			OutputDebugStringW(L"[Favorite] Added to favorites\n");
+			// 更新 UI 显示实心心形
+		}
+		else
+		{
+			OutputDebugStringW(L"[Favorite] Removed from favorites\n");
+			// 更新 UI 显示空心心形
+		}
+
+		Composite();
+		*/
+	}
+	void MainWindow::HandleSoundButtonClick(HWND hwnd)
+	{
+		OutputDebugStringW(L"[Button Click] Sound (Volume)\n");
+
+		// TODO: 实现音量控制功能
+		// 1. 显示音量滑块窗口
+		// 2. 或者在长按时拖动调整
+		// 3. 可以循环切换音量等级（静音 -> 低 -> 中 -> 高）
+
+		/*
+		示例实现：
+		// 显示音量菜单
+		ShowVolumeMenu(hwnd);
+
+		或者：
+
+		// 静音/取消静音
+		if (m_audioPlayer)
+		{
+			float currentVolume = m_audioPlayer->GetVolume();
+			if (currentVolume > 0.0f)
+			{
+				m_audioPlayer->SetVolume(0.0f);
+				OutputDebugStringW(L"[Volume] Muted\n");
+			}
+			else
+			{
+				m_audioPlayer->SetVolume(0.7f);
+				OutputDebugStringW(L"[Volume] Unmuted\n");
+			}
+		}
+		*/
+	}
+	void MainWindow::HandleListButtonClick(HWND hwnd)
+	{
+		OutputDebugStringW(L"[Button Click] List (Playlist)\n");
+
+		// TODO: 实现播放列表功能
+		// 1. 显示播放列表下拉菜单
+		// 2. 或展开侧边栏显示列表
+		// 3. 允许用户选择要播放的曲目
+
+		/*
+		示例实现：
+		ShowPlaylistWindow(hwnd);
+
+		或者：
+
+		// 切换列表可见性
+		m_playlistVisible = !m_playlistVisible;
+		if (m_playlistVisible)
+		{
+			OutputDebugStringW(L"[Playlist] Showing playlist\n");
+			// 显示播放列表 UI
+		}
+		else
+		{
+			OutputDebugStringW(L"[Playlist] Hiding playlist\n");
+			// 隐藏播放列表 UI
+		}
+
+		Composite();
+		*/
+	}
+
 	void MainWindow::DrawTrackInfoGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& cardRect, const Gdiplus::RectF& avatarRect)
 	{
 		// 在卡片右侧、头像旁边绘制歌名和歌手信息
@@ -1707,7 +2096,6 @@ namespace YuMediaPlayer
 			g.DrawString(single.c_str(), -1, &font, Gdiplus::PointF(textX, startY), &brush);
 		}
 	}
-
 	void MainWindow::RestoreWindow()
 	{
 		if (!m_isCollapsed || m_isAnimating)
@@ -1728,25 +2116,21 @@ namespace YuMediaPlayer
 			Composite();
 		}
 	}
-
 	void MainWindow::SetCoverImage(const std::wstring& path)
 	{
 		m_avatar.LoadImageFromFile(path);
 		Composite();
 	}
-
 	void MainWindow::SetPlayProgress(float progress01)
 	{
 		m_avatar.SetProgress(progress01);
 		Composite();
 	}
-
 	void MainWindow::SetAvatarSkin(const CircularAvatar::Skin& skin)
 	{
 		m_avatar.SetSkin(skin);
 		Composite();
 	}
-
 	void MainWindow::SetTrackInfo(const std::wstring& title, const std::wstring& artist)
 	{
 		m_trackTitle = title;
