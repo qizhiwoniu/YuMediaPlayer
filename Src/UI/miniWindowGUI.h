@@ -1,17 +1,38 @@
 #pragma once
 #include <windows.h>
 #include <windowsx.h>
+#include <gdiplus.h>
 #include "WindowGUI.h"
 #include "Core/AudioPlayer.h"
 
 namespace YuMediaPlayer
 {
+	struct ControlButtonInfo
+	{
+		Gdiplus::RectF rect;
+		bool hovered = false;
+	};
 	// 播放按钮状态和位置信息
 	struct PlayButtonInfo
 	{
 		RECT buttonRect;           // 按钮矩形区域
 		bool isPlaying = false;    // 是否正在播放
 		bool isHovered = false;    // 鼠标是否悬停在按钮上
+	};
+	// 所有播放按钮的信息集合
+	struct PlaybackButtonsInfo
+	{
+		ControlButtonInfo previous;
+		ControlButtonInfo play;
+		ControlButtonInfo next;
+		// 右上角按钮
+		ControlButtonInfo close;    // 关闭按钮
+		ControlButtonInfo mini;     // 最小化按钮
+		// 右侧按钮
+		ControlButtonInfo sound;    // 音量按钮
+		ControlButtonInfo list;     // 列表按钮
+		// 左侧按钮
+		ControlButtonInfo heart;    // 收藏按钮
 	};
 	// 右键菜单的命令 ID，MainWindow 根据 ShowMiniPlayerContextMenu 的返回值
 	// 判断用户点了哪一项。
@@ -41,8 +62,41 @@ namespace YuMediaPlayer
 	int ShowMiniPlayerContextMenu(HWND hwnd, POINT pt, YuMediaPlayer::WindowGUI* windowGUI = nullptr);
 	void HandleMiniPlayerContextMenuCommand(HWND hwnd, int cmd, YuMediaPlayer::WindowGUI* windowGUI = nullptr);
 
-	// ===== 新增：播放按钮相关函数 =====
+	
+	// ===== GDI+ 按钮绘制函数 =====
 
+	// 绘制播放/暂停按钮
+	void DrawPlayButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool isPlaying, bool hovered);
+	// 绘制上一曲按钮
+	void DrawPreviousButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered);
+	// 绘制下一曲按钮
+	void DrawNextButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered);
+	// 绘制所有播放控制按钮
+	void DrawPlaybackButtonsGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, const Gdiplus::RectF& avatarRect, PlaybackButtonsInfo& buttonInfo);
+	// 绘制关闭按钮
+	void DrawCloseButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered);
+	// 绘制最小化按钮
+	void DrawMiniButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered);
+	// 绘制音量按钮
+	void DrawSoundButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered);
+	// 绘制列表按钮
+	void DrawListButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered);
+	// 绘制收藏按钮
+	void DrawHeartButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered);
+
+	// ===== 按钮点击处理函数 =====
+
+	void HandleCloseButtonClick(HWND hwnd);
+	void HandleMiniButtonClick(HWND hwnd, WindowGUI* windowGUI);
+	void HandleSoundButtonClick(HWND hwnd);
+	void HandleListButtonClick(HWND hwnd);
+	void HandleHeartButtonClick(HWND hwnd);
+	void HandlePreviousButtonClick(HWND hwnd);
+	void HandleNextButtonClick(HWND hwnd);
+	void HandlePlayButtonClick(HWND hwnd, const std::wstring& mp3FilePath);
+
+	// ===== GDI 风格的播放按钮函数 =====
+	// ===== 新增：播放按钮相关函数 =====
 	// 在给定的 HDC 上绘制播放按钮
 	void DrawPlayButton(HDC hdc, const PlayButtonInfo& buttonInfo);
 
