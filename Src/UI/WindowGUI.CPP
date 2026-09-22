@@ -15,7 +15,8 @@ namespace YuMediaPlayer
 		Maximize = 1,   // 最大化
 		Minimize = 2,   // 最小化
 		Settings = 3,   // 设置
-		Count = 4
+		Updata = 4,     // 刷新/更新
+		Count = 5
 	};
 	WindowGUI::WindowGUI()
 		: m_hwnd(nullptr)
@@ -26,7 +27,7 @@ namespace YuMediaPlayer
 		// 保存全局实例指针，用于 WndProc 回调
 		g_windowGUIInstance = this;
 
-		for (int i = 0; i < 4; i++)
+		for (int i = 0; i < 5; i++)
 			m_buttonRects[i] = { 0, 0, 0, 0 };
 	}
 
@@ -214,11 +215,19 @@ namespace YuMediaPlayer
 			}
 			break;
 		}
+		case 4:  // 更新按钮 - 刷新符号
+		{
+			int radius = 6;
+			Arc(hdc, centerX - radius, centerY - radius, centerX + radius, centerY + radius, centerX + radius, centerY, centerX, centerY - radius);
+			LineTo(hdc, centerX + 2, centerY - 2);
+			MoveToEx(hdc, centerX + 2, centerY - 2, nullptr);
+			LineTo(hdc, centerX + 4, centerY - 4);
+			break;
+		}
 		}
 		SelectObject(hdc, hOldIconPen);
 		DeleteObject(hIconPen);
 	}
-	// 更新按钮位置
 	void WindowGUI::UpdateButtonRects(int width)
 	{
 		const int titleBarHeight = 30;
@@ -244,6 +253,10 @@ namespace YuMediaPlayer
 		};
 		rightX -= buttonWidth;
 		m_buttonRects[static_cast<int>(ButtonType::Settings)] = {
+			rightX - buttonWidth, 0, rightX, buttonHeight
+		};
+		rightX -= buttonWidth;
+		m_buttonRects[static_cast<int>(ButtonType::Updata)] = {
 			rightX - buttonWidth, 0, rightX, buttonHeight
 		};
 	}
@@ -314,7 +327,7 @@ namespace YuMediaPlayer
 			DeleteObject(hFont);
 
 			// 绘制按钮
-			for (int i = 0; i < 4; i++)
+			for (int i = 0; i < 5; i++)
 			{
 				bool hovered = (m_hoverButton == i);
 				DrawButton(hdc, m_buttonRects[i], hovered, i);
@@ -330,7 +343,7 @@ namespace YuMediaPlayer
 			pt.y = GET_Y_LPARAM(lParam);
 
 			int newHoverButton = -1;
-			for (int i = 0; i < 4; i++)
+			for (int i = 0; i < 5; i++)
 			{
 				if (PtInRect(&m_buttonRects[i], pt))
 				{
@@ -423,7 +436,7 @@ namespace YuMediaPlayer
 			GetWindowRect(hwnd, &wr);
 			// 检查是否在按钮上
 			POINT clientPt = { pt.x - wr.left, pt.y - wr.top };
-			for (int i = 0; i < 4; i++)
+			for (int i = 0; i <	5; i++)
 			{
 				if (PtInRect(&m_buttonRects[i], clientPt))
 					return HTCLIENT;  // 让客户区处理
