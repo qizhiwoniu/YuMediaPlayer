@@ -8,6 +8,14 @@
 namespace YuMediaPlayer
 {
 	WindowGUI* m_windowGUI = nullptr;
+
+	// 播放按钮信息（缓存）。真正的定义在 MainWindow.cpp，这里用 extern 共享
+	// 同一个对象——之前这里单独定义了一份放在匿名命名空间里（内部链接），
+	// 导致这份和 MainWindow.cpp 里做点击检测用的是两个完全不同的变量，
+	// DrawPlayButtonGdiplus 算出来的按钮坐标永远传不到点击检测那边，
+	// 所以点播放按钮没反应。
+	extern PlayButtonInfo g_playButtonInfo;
+
 	namespace
 	{
 		// 菜单项文字。字符串字面量是静态存储期，地址在整个程序运行期间
@@ -126,8 +134,6 @@ namespace YuMediaPlayer
 		// 全局音频播放器实例
 		AudioPlayer* g_audioPlayer = nullptr;
 
-		// 播放按钮信息（缓存）
-		PlayButtonInfo g_playButtonInfo = {};
 		HBRUSH DarkMenuBackgroundBrush()
 		{
 			// 只创建一次，进程生命周期内复用，不需要每次弹菜单都新建/销毁。
@@ -966,16 +972,10 @@ namespace YuMediaPlayer
 	}
 	void HandleCloseButtonClick(HWND hwnd)
 	{
-		OutputDebugStringW(L"[Button Click] Close\n");
-
-		// 关闭程序
 		SendMessage(hwnd, WM_CLOSE, 0, 0);
 	}
 	void HandleMiniButtonClick(HWND hwnd, WindowGUI* windowGUI)
 	{
-		OutputDebugStringW(L"[Button Click] Minimize\n");
-
-		// 隐藏窗口，显示主窗口 GUI
 		if (m_windowGUI)
 		{
 			ShowWindow(hwnd, SW_HIDE);
@@ -1075,46 +1075,24 @@ namespace YuMediaPlayer
 		Composite();
 		*/
 	}
-
+	void HandlePreviousButtonClick(HWND hwnd){};
+	void HandleNextButtonClick(HWND hwnd){};
 	// ===== 新增：播放按钮相关实现 =====
-		
-	void DrawPlayButton(HDC hdc, const PlayButtonInfo& buttonInfo)
-	{
-		// 计算按钮中心
-		int centerX = (buttonInfo.buttonRect.left + buttonInfo.buttonRect.right) / 2;
-		int centerY = (buttonInfo.buttonRect.top + buttonInfo.buttonRect.bottom) / 2;
-		int radius = (buttonInfo.buttonRect.right - buttonInfo.buttonRect.left) / 2;
-
-		// 选择按钮背景颜色
-		COLORREF bgColor = kPlayButtonColor;
-		if (buttonInfo.isHovered)
-		{
-			bgColor = kPlayButtonHoverColor;
-		}
-		if (buttonInfo.isPlaying)
-		{
-			bgColor = kPlayButtonPlayingColor;
-		}
-
-		// 绘制圆形按钮背景
-		DrawCircleButton(hdc, centerX, centerY, radius, bgColor);
-
-		// 绘制图标（播放或停止）
-		if (buttonInfo.isPlaying)
-		{
-			DrawStopIcon(hdc, centerX, centerY, radius - 5, kPlayButtonIconColor);
-		}
-		else
-		{
-			DrawPlayIcon(hdc, centerX, centerY, radius - 5, kPlayButtonIconColor);
-		}
-	}
+	// （原来这里还有一个 DrawPlayButton(HDC, ...) 版本，但已经没有任何地方
+	// 调用它了——Composite() 现在整体走 GDI+ 合成，实际画播放按钮用的是
+	// DrawPlayButtonGdiplus，所以把这个废弃的 HDC 版本删掉了，避免混淆。)
 
 	PlayButtonInfo CalculatePlayButtonRect(int baseX, int baseY, int buttonSize)
 	{
+		// 之前这里额外加了 kPlayButtonPadding（8px），但 DrawPlayButtonGdiplus
+		// 传进来的 baseX/baseY 已经是实际画椭圆的左上角坐标——椭圆本身画在
+		// (baseX, baseY) 到 (baseX+buttonSize, baseY+buttonSize)，没有再额外
+		// 加 padding。结果就是这里算出来的点击检测区域，跟屏幕上真正画出来的
+		// 按钮圆，整体往右下偏移了 8px，点在按钮边缘（尤其左上边缘）会点不中。
+		// 去掉这个多余的偏移，让点击区域跟视觉上的按钮完全重合。
 		PlayButtonInfo info = {};
-		info.buttonRect.left = baseX + kPlayButtonPadding;
-		info.buttonRect.top = baseY + kPlayButtonPadding;
+		info.buttonRect.left = baseX;
+		info.buttonRect.top = baseY;
 		info.buttonRect.right = info.buttonRect.left + buttonSize;
 		info.buttonRect.bottom = info.buttonRect.top + buttonSize;
 		return info;
@@ -1165,9 +1143,18 @@ namespace YuMediaPlayer
 
 	void HandlePlayButtonClick(HWND hwnd, const std::wstring& mp3FilePath)
 	{
+		// 先打一行日志证明"点击确实落到了播放按钮、这个函数确实被调用了"，
+		// 独立于后面播放成功/失败——如果连这行都在 DebugView/输出窗口里
+		// 看不到，说明问题根本不在 AudioPlayer 里，而是点击没有命中按钮，
+		// 或者压根没在用能看到 OutputDebugString 的方式运行程序。
+		OutputDebugStringW(L"[Button Click] Play button clicked, HandlePlayButtonClick 被调用\n");
+
+		// 临时诊断用：不管有没有接调试工具，都弹窗告诉用户到底发生了什么，
+		// 方便先确认问题出在哪一层。确认好之后可以把这几个 MessageBoxW 删掉。
 		if (g_audioPlayer == nullptr)
 		{
 			OutputDebugStringW(L"Audio player not initialized\n");
+			MessageBoxW(hwnd, L"g_audioPlayer 是空指针：InitializeAudioPlayer() 没成功执行。\n请检查 MainWindow::Initialize 里 InitializeAudioPlayer() 的返回值和相关日志。", L"诊断", MB_OK | MB_ICONWARNING);
 			return;
 		}
 
@@ -1187,6 +1174,9 @@ namespace YuMediaPlayer
 			if (!g_audioPlayer->Play(mp3FilePath))
 			{
 				OutputDebugStringW(L"Failed to play audio file\n");
+				MessageBoxW(hwnd,
+					(L"播放失败：" + mp3FilePath + L"\n可能原因：文件不存在/路径不对、格式不支持、或音频设备/渲染器激活失败。\n具体原因请看 DebugView 或 VS 输出窗口里 [AudioPlayer] 开头的日志。").c_str(),
+					L"诊断", MB_OK | MB_ICONERROR);
 			}
 		}
 

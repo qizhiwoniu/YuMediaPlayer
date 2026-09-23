@@ -356,9 +356,21 @@ namespace YuMediaPlayer
 
 			if (IsPointInPlayButton(pt, g_playButtonInfo))
 			{
-				std::wstring mp3 = L"Assets\\song\\local\\周杰伦-七里香.mp3";
-				HandlePlayButtonClick(hwnd, mp3);  // 播放或暂停
-				TogglePlayPause(hwnd);
+				std::wstring mp3 = L"song\\local\\周杰伦-七里香.mp3";
+				HandlePlayButtonClick(hwnd, mp3);  // 播放/暂停/继续，三种状态它自己会判断
+				// 之前这里紧接着又调用了一次 TogglePlayPause(hwnd)，
+				// 相当于把刚播放起来的状态又立刻切换了一次（Playing -> Pause），
+				// 导致歌曲一启动就被暂停。HandlePlayButtonClick 已经处理了
+				// 全部三种状态切换，不需要再调用 TogglePlayPause。
+				//
+				// 重点修复：窗口是分层窗口（UpdateLayeredWindow 绘制），
+				// HandlePlayButtonClick 内部只调用了 InvalidateRect，而分层
+				// 窗口根本不会走常规的 WM_PAINT 重绘路径——本文件里悬停状态
+				// 变化、收起/展开动画帧等其它所有地方，改完状态后都紧跟着
+				// 调用了 Composite()，唯独播放按钮点击这里漏了。结果就是：
+				// 哪怕 Play()/Pause() 内部状态确实切换了，按钮图标在屏幕上
+				// 也永远不会跟着变。
+				Composite();
 				return 0;
 			}
 			if (IsPointInRectF(pt, buttonsInfo.close.rect))
@@ -485,6 +497,26 @@ namespace YuMediaPlayer
 			ScreenToClient(hwnd, &clientPt);
 			if (m_avatar.HitTest(m_avatarRectF, clientPt))
 				return HTCLIENT;
+
+			// 重点修复：下面"标题栏（用于拖动）"那段把窗口底部 70px 整条
+			// 都判成 HTCAPTION，而播放/暂停、上一曲、下一曲、收藏、关闭、
+			// mini、音量、列表这些按钮全部都在这 70px 范围内。HTCAPTION
+			// 会让点击被当成"拖标题栏"走非客户区消息，根本不会产生
+			// WM_LBUTTONUP 这种客户区消息——这才是"点播放按钮完全没反应、
+			// 连一行日志都没有"的真正原因，不是按钮坐标算错了。
+			// 这里把所有按钮命中区域都从"可拖动区域"里挖掉，落在按钮上
+			// 就正常返回 HTCLIENT，落在按钮之间的空白处才继续走拖动逻辑。
+			if (IsPointInPlayButton(clientPt, g_playButtonInfo)
+				|| IsPointInRectF(clientPt, buttonsInfo.close.rect)
+				|| IsPointInRectF(clientPt, buttonsInfo.mini.rect)
+				|| IsPointInRectF(clientPt, buttonsInfo.sound.rect)
+				|| IsPointInRectF(clientPt, buttonsInfo.list.rect)
+				|| IsPointInRectF(clientPt, buttonsInfo.heart.rect)
+				|| IsPointInRectF(clientPt, buttonsInfo.previous.rect)
+				|| IsPointInRectF(clientPt, buttonsInfo.next.rect))
+			{
+				return HTCLIENT;
+			}
 
 			// 标题栏（用于拖动） - 卡片顶部区域
 			if (pt.y >= wr.bottom - 70 && pt.y < wr.bottom)
@@ -1338,8 +1370,6 @@ namespace YuMediaPlayer
 				Gdiplus::RectF vRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
 				DrawPlayButtonGdiplus(g, vRect, false, false);
 				DrawPlaybackButtonsGdiplus(g, vRect, avatarRect, buttonsInfo);
-				//DrawPreviousButtonGdiplus(g, vRect, false);
-				//DrawNextButtonGdiplus(g, vRect, false);
 			}
 		}
 
