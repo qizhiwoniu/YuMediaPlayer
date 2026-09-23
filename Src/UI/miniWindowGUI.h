@@ -3,6 +3,7 @@
 #include <windowsx.h>
 #include <gdiplus.h>
 #include "WindowGUI.h"
+#include "MainWindow.h"
 #include "Core/AudioPlayer.h"
 
 namespace YuMediaPlayer
@@ -49,6 +50,10 @@ namespace YuMediaPlayer
 		constexpr UINT LoopModeSingleLoop = 2002; // 单曲循环
 		constexpr UINT LoopModeShuffle = 2003;    // 随机播放
 		constexpr UINT LoopModeHeart = 2004;      // 心动循环
+
+		// 圆形头像菜单命令（新增）
+		constexpr UINT AvatarRotate = 3001;       // 旋转头像
+		constexpr UINT AvatarStop = 3002;         // 停止旋转（复位）
 	}
 
 	UINT GetCurrentLoopMode();
@@ -61,6 +66,20 @@ namespace YuMediaPlayer
 	// 显示迷你播放器上下文菜单
 	int ShowMiniPlayerContextMenu(HWND hwnd, POINT pt, YuMediaPlayer::WindowGUI* windowGUI = nullptr);
 	void HandleMiniPlayerContextMenuCommand(HWND hwnd, int cmd, YuMediaPlayer::WindowGUI* windowGUI = nullptr);
+	// 显示圆形头像的右键菜单
+	int ShowAvatarContextMenu(HWND hwnd, POINT pt);
+	// 处理圆形头像菜单命令
+	void HandleAvatarContextMenuCommand(HWND hwnd, int cmd);
+	// 启动头像旋转
+	void StartAvatarRotation(HWND hwnd);
+	// 停止头像旋转并复位
+	void StopAvatarRotation(HWND hwnd);
+	// 处理旋转定时器（在 MainWindow 的 WM_TIMER 中调用）
+	void HandleAvatarRotationTimer(HWND hwnd, MainWindow* pMainWindow);
+	// 获取当前头像旋转角度
+	float GetAvatarRotation();
+	// 获取头像是否正在旋转
+	bool IsAvatarRotating();
 
 	
 	// ===== GDI+ 按钮绘制函数 =====

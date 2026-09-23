@@ -4,6 +4,7 @@
 #include <memory>
 #include <windowsx.h>
 #include <algorithm>
+#include <cmath>
 #include "Core/Theme.h"
 #include "UI/WindowGUI.h"
 #include "UI/miniWindowGUI.h"
@@ -15,7 +16,12 @@ namespace YuMediaPlayer
 {
 	PlayButtonInfo g_playButtonInfo = {};
 	std::wstring g_currentMp3Path = L"";
-
+	PlaybackButtonsInfo buttonsInfo = {};
+	static bool IsPointInRectF(POINT pt, const Gdiplus::RectF& rect)
+	{
+		return pt.x >= rect.X && pt.x <= rect.X + rect.Width
+			&& pt.y >= rect.Y && pt.y <= rect.Y + rect.Height;
+	}
 	MainWindow::MainWindow()
 		: m_hwnd(nullptr)
 		, m_theme()
@@ -227,34 +233,65 @@ namespace YuMediaPlayer
 				UpdateCollapseAnimation();
 				return 0;
 			}
+			else if (wParam == 3001)
+			{
+				// 更新角度后必须 Composite()，因为窗口使用 UpdateLayeredWindow。
+				HandleAvatarRotationTimer(hwnd, this);
+				if (IsAvatarRotating())
+					Composite();
+				return 0;
+			}
 			break;
 		}
 		case WM_CONTEXTMENU:
 		{
-			POINT pt;
-			pt.x = GET_X_LPARAM(lParam);
-			pt.y = GET_Y_LPARAM(lParam);
-			int cmd = ShowMiniPlayerContextMenu(hwnd, pt, m_windowGUI.get());  
-			if (cmd != 0)
+			// lParam 是屏幕坐标；头像矩形是客户区坐标，必须先转换。
+			POINT screenPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+			if (screenPt.x == -1 && screenPt.y == -1)
+				GetCursorPos(&screenPt);
+
+			POINT clientPt = screenPt;
+			ScreenToClient(hwnd, &clientPt);
+
+			if (m_avatar.HitTest(m_avatarRectF, clientPt))
 			{
-				// ✅ 添加第三个参数：m_windowGUI.get()
-				HandleMiniPlayerContextMenuCommand(hwnd, cmd, m_windowGUI.get());
+				int cmd = ShowAvatarContextMenu(hwnd, screenPt);
+				if (cmd != 0)
+				{
+					HandleAvatarContextMenuCommand(hwnd, cmd);
+					Composite();
+				}
+			}
+			else
+			{
+				int cmd = ShowMiniPlayerContextMenu(hwnd, screenPt, m_windowGUI.get());
+				if (cmd != 0)
+					HandleMiniPlayerContextMenuCommand(hwnd, cmd, m_windowGUI.get());
 			}
 			return 0;
 		}
 		case WM_NCRBUTTONUP:
 		{
-			if (wParam == HTCAPTION)
+			POINT screenPt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+			POINT clientPt = screenPt;
+			ScreenToClient(hwnd, &clientPt);
+
+			if (m_avatar.HitTest(m_avatarRectF, clientPt))
 			{
-				POINT pt;
-				pt.x = GET_X_LPARAM(lParam);
-				pt.y = GET_Y_LPARAM(lParam);
-				int cmd = ShowMiniPlayerContextMenu(hwnd, pt, m_windowGUI.get());  
+				int cmd = ShowAvatarContextMenu(hwnd, screenPt);
 				if (cmd != 0)
 				{
-					// ✅ 添加第三个参数：m_windowGUI.get()
-					HandleMiniPlayerContextMenuCommand(hwnd, cmd, m_windowGUI.get());
+					HandleAvatarContextMenuCommand(hwnd, cmd);
+					Composite();
 				}
+				return 0;
+			}
+
+			if (wParam == HTCAPTION)
+			{
+				int cmd = ShowMiniPlayerContextMenu(hwnd, screenPt, m_windowGUI.get());
+				if (cmd != 0)
+					HandleMiniPlayerContextMenuCommand(hwnd, cmd, m_windowGUI.get());
 				return 0;
 			}
 			break;
@@ -324,7 +361,41 @@ namespace YuMediaPlayer
 				TogglePlayPause(hwnd);
 				return 0;
 			}
-
+			if (IsPointInRectF(pt, buttonsInfo.close.rect))
+			{
+				HandleCloseButtonClick(hwnd);
+				return 0;
+			}
+			if (IsPointInRectF(pt, buttonsInfo.mini.rect))
+			{
+				HandleMiniButtonClick(hwnd, m_windowGUI.get());
+				return 0;
+			}
+			if (IsPointInRectF(pt, buttonsInfo.sound.rect))
+			{
+				HandleSoundButtonClick(hwnd);
+				return 0;
+			}
+			if (IsPointInRectF(pt, buttonsInfo.list.rect))
+			{
+				HandleListButtonClick(hwnd);
+				return 0;
+			}
+			if (IsPointInRectF(pt, buttonsInfo.heart.rect))
+			{
+				HandleHeartButtonClick(hwnd);
+				return 0;
+			}
+			/*if (IsPointInRectF(pt, buttonsInfo.previous.rect))
+			{
+				HandlePreviousButtonClick(hwnd);
+				return 0;
+			}
+			if (IsPointInRectF(pt, buttonsInfo.next.rect))
+			{
+				HandleNextButtonClick(hwnd);
+				return 0;
+			}*/
 			return 0;
 		}
 		case WM_MOUSEMOVE:
@@ -344,6 +415,27 @@ namespace YuMediaPlayer
 			// ✅ 检测播放按钮悬停状态
 			bool wasPlayHovered = g_playButtonInfo.isHovered;
 			g_playButtonInfo.isHovered = IsPointInPlayButton(pt, g_playButtonInfo);
+			// UpdateLayeredWindow 一次性推上去的，没有独立的子窗口，
+						// 所以悬停状态变了就得整体重画（Composite），不能只 InvalidateRect。
+			bool anyHoverChanged = (wasPlayHovered != g_playButtonInfo.isHovered);
+
+			auto updateHover = [&](ControlButtonInfo& btn)
+				{
+					bool was = btn.hovered;
+					btn.hovered = IsPointInRectF(pt, btn.rect);
+					if (was != btn.hovered)
+						anyHoverChanged = true;
+				};
+			updateHover(buttonsInfo.close);
+			updateHover(buttonsInfo.mini);
+			updateHover(buttonsInfo.sound);
+			updateHover(buttonsInfo.list);
+			updateHover(buttonsInfo.heart);
+			updateHover(buttonsInfo.previous);
+			updateHover(buttonsInfo.next);
+
+			if (anyHoverChanged)
+				Composite();
 
 			return 0;
 		}
@@ -389,6 +481,11 @@ namespace YuMediaPlayer
 			if (top)    return HTTOP;
 			if (bottom) return HTBOTTOM;
 			
+			POINT clientPt = pt;
+			ScreenToClient(hwnd, &clientPt);
+			if (m_avatar.HitTest(m_avatarRectF, clientPt))
+				return HTCLIENT;
+
 			// 标题栏（用于拖动） - 卡片顶部区域
 			if (pt.y >= wr.bottom - 70 && pt.y < wr.bottom)
 			{
@@ -414,6 +511,9 @@ namespace YuMediaPlayer
 			return 0;
 		}
 		case WM_DESTROY:
+			if (IsAvatarRotating() || GetAvatarRotation() != 0.0f)
+				StopAvatarRotation(hwnd);
+
 			if (m_edgeHoverTimer != 0)
 			{
 				KillTimer(hwnd, m_edgeHoverTimer);
@@ -427,8 +527,8 @@ namespace YuMediaPlayer
 			PostQuitMessage(0);
 			return 0;
 
-		//default:
-			//return DefWindowProc(hwnd, msg, wParam, lParam);
+		default:
+			return DefWindowProc(hwnd, msg, wParam, lParam);
 		}
 
 		//return DefWindowProc(hwnd, msg, wParam, lParam);
@@ -847,6 +947,30 @@ namespace YuMediaPlayer
 			g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
 			g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
 
+			auto drawAvatar = [&](const Gdiplus::RectF& avatarRect)
+			{
+				m_avatarRectF = avatarRect;
+				Gdiplus::GraphicsState state = g.Save();
+				Gdiplus::GraphicsPath clipPath;
+				clipPath.AddEllipse(avatarRect.X, avatarRect.Y,
+					avatarRect.Width, avatarRect.Height);
+				g.SetClip(&clipPath, Gdiplus::CombineModeReplace);
+
+				const float centerX = avatarRect.X + avatarRect.Width * 0.5f;
+				const float centerY = avatarRect.Y + avatarRect.Height * 0.5f;
+				const float rotation = GetAvatarRotation();
+
+				if (std::fabs(rotation) > 0.001f)
+				{
+					g.TranslateTransform(centerX, centerY);
+					g.RotateTransform(rotation);
+					g.TranslateTransform(-centerX, -centerY);
+				}
+
+				m_avatar.Draw(g, avatarRect);
+				g.Restore(state);
+			};
+
 			// 清空为全透明
 			g.Clear(Gdiplus::Color(0, 0, 0, 0));
 
@@ -882,8 +1006,7 @@ namespace YuMediaPlayer
 				g.FillPath(&cardBrush, &path);
 
 				// 头像仍然画在同样的位置（露出卡片顶部，且不影响边缘吸附计算）
-				m_avatarRectF = avatarRect;
-				m_avatar.Draw(g, avatarRect);
+				drawAvatar(avatarRect);
 			}
 			else if (m_isAnimating && m_animationIsCollapsing)
 			{
@@ -907,8 +1030,7 @@ namespace YuMediaPlayer
 				// 绘制头像（始终可见）
 				// X 从 8 改为 18：向右移动 10px，让卡片左边露出一点在头像左侧。
 				Gdiplus::RectF avatarRect(18.0f, 0.0f, 84.0f, 84.0f);
-				m_avatarRectF = avatarRect;
-				m_avatar.Draw(g, avatarRect);
+				drawAvatar(avatarRect);
 
 				// 绘制歌曲信息（逐渐透明消失）
 				float textAlphaProgress = m_animationProgress;  // 文字随着动画进度逐渐消失
@@ -983,8 +1105,7 @@ namespace YuMediaPlayer
 				// 绘制头像（始终可见）
 				// X 从 8 改为 18：向右移动 10px，让卡片左边露出一点在头像左侧。
 				Gdiplus::RectF avatarRect(18.0f, 0.0f, 84.0f, 84.0f);
-				m_avatarRectF = avatarRect;
-				m_avatar.Draw(g, avatarRect);
+				drawAvatar(avatarRect);
 
 				// 绘制歌曲信息（逐渐显示）
 				float textAlphaProgress = m_animationProgress;
@@ -1060,8 +1181,7 @@ namespace YuMediaPlayer
 				// 绘制头像（始终可见）
 				// X 从 8 改为 18：向右移动 10px，让卡片左边露出一点在头像左侧。
 				Gdiplus::RectF avatarRect(18.0f, 0.0f, 84.0f, 84.0f);
-				m_avatarRectF = avatarRect;
-				m_avatar.Draw(g, avatarRect);
+				drawAvatar(avatarRect);
 
 				// 绘制歌曲信息（逐渐透明消失）
 				float textAlphaProgress = m_animationProgress;  // 文字随着动画进度逐渐消失
@@ -1136,8 +1256,7 @@ namespace YuMediaPlayer
 				// 绘制头像（始终可见）
 				// X 从 8 改为 18：向右移动 10px，让卡片左边露出一点在头像左侧。
 				Gdiplus::RectF avatarRect(18.0f, 0.0f, 84.0f, 84.0f);
-				m_avatarRectF = avatarRect;
-				m_avatar.Draw(g, avatarRect);
+				drawAvatar(avatarRect);
 
 				// 绘制歌曲信息（逐渐显示）
 				float textAlphaProgress = m_animationProgress;
@@ -1210,8 +1329,7 @@ namespace YuMediaPlayer
 				// 绘制圆形头像和进度环。
 				// X 从 8 改为 18：向右移动 10px，让卡片左边露出一点在头像左侧。
 				Gdiplus::RectF avatarRect(18.0f, 0.0f, 84.0f, 84.0f);
-				m_avatarRectF = avatarRect;
-				m_avatar.Draw(g, avatarRect);
+				drawAvatar(avatarRect);
 
 				// 绘制歌曲信息。
 				Gdiplus::RectF textCardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
@@ -1219,7 +1337,7 @@ namespace YuMediaPlayer
 				// 绘制播放按钮。
 				Gdiplus::RectF vRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
 				DrawPlayButtonGdiplus(g, vRect, false, false);
-				//DrawPlaybackButtonsGdiplus(g, vRect, avatarRect);
+				DrawPlaybackButtonsGdiplus(g, vRect, avatarRect, buttonsInfo);
 				//DrawPreviousButtonGdiplus(g, vRect, false);
 				//DrawNextButtonGdiplus(g, vRect, false);
 			}
@@ -1247,6 +1365,7 @@ namespace YuMediaPlayer
 			ReleaseDC(nullptr, hScreenDC);
 		}
 	}
+
 	void MainWindow::DrawTrackInfoGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& cardRect, const Gdiplus::RectF& avatarRect)
 	{
 		// 在卡片右侧、头像旁边绘制歌名和歌手信息

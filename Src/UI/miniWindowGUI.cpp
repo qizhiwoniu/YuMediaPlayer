@@ -39,6 +39,87 @@ namespace YuMediaPlayer
 		constexpr COLORREF kPlayButtonPlayingColor = RGB(200, 100, 100);  // 播放中时的颜色（红色停止按钮）
 		constexpr COLORREF kPlayButtonIconColor = RGB(255, 255, 255);  // 图标颜色（白色）
 
+		// ===== 播放控制栏统一布局参数 =====
+		// 之前的问题：DrawPlayButtonGdiplus 自己算一套播放按钮坐标，
+		// DrawPlaybackButtonsGdiplus 又用另一套坐标算其余按钮（而且右侧几个
+		// 按钮都是直接拿 clientW 减一个固定值，互相之间没留够间距），
+		// 两边各算各的，才会挤在一起、对不齐。
+		// 现在统一由 ComputePlaybackRowLayout 一次性算出整排按钮的位置，
+		// 播放按钮和其余图标共用同一份数据，保证真正排在同一条水平线上。
+		//
+		// mini（还原/小窗模式）、音量、列表都不再放进这条自动居中的横排里——
+		// 横排一宽，最右边的按钮就会被挤到卡片外面（之前 mini 挤出去过，
+		// 后来 list 也挤出去了，都是同一个原因）。现在把 close/mini/列表/
+		// 音量固定锚定在卡片右侧，音量和列表紧挨在 mini 左边、留一点间距，
+		// 完全不受横排宽度变化的影响；横排现在只负责中间这四个按钮
+		// （收藏、上一曲、播放、下一曲）。
+		constexpr int kRowLeftMargin = 10;
+		constexpr int kRowAvatarSize = 84;
+		constexpr int kRowAvatarSpacing = 10;
+
+		constexpr int kRowIconSize = 24;        // 上一曲/下一曲 图标大小
+		constexpr int kRowAccentIconSize = 30;  // 收藏/音量/列表 图标大小（比其它图标更大一些）
+		constexpr int kRowPlaySize = 34;        // 播放按钮大小（比其它图标略大，作为视觉焦点）
+		constexpr int kRowGap = 5;             // 横排内图标之间的间距
+
+		// 关闭按钮 + mini 按钮，右上角固定的一列
+		constexpr int kCornerButtonSize = 16;
+		constexpr int kCornerMargin = 8;    // 离卡片右边缘/上边缘的距离
+		constexpr int kCornerSpacing = 4;   // close 和 mini 之间的垂直间距
+
+		// 音量、列表：紧挨在 mini 左边的一小排，跟 mini 上下对齐（同一个中心高度）
+		constexpr int kSideGap = 10;         // 音量-列表-mini 彼此之间的间距
+
+		// 横排要给右侧这一整块（音量+列表+mini/close 列）预留出空间，
+		// 避免横排的最后一个按钮跟它们撞在一起。
+		constexpr int kRowRightReserve =
+			kCornerMargin + kCornerButtonSize        // mini（跟 close 对齐的那一列）
+			+ kSideGap + kRowAccentIconSize           // 列表
+			+ kSideGap + kRowAccentIconSize           // 音量
+			+ kRowGap;                                // 音量和横排最后一个按钮之间留的间距
+
+		struct PlaybackRowLayout
+		{
+			int heartX = 0, previousX = 0, playX = 0, nextX = 0;
+			int centerY = 0;
+		};
+
+		// 从左到右依次排列：收藏 - 上一曲 - 播放 - 下一曲，
+		// 整排在头像右侧、右侧固定按钮区左侧的剩余空间里水平居中。
+		PlaybackRowLayout ComputePlaybackRowLayout(const Gdiplus::RectF& vRect)
+		{
+			const int clientW = static_cast<int>(vRect.Width);
+			const int clientH = static_cast<int>(vRect.Height);
+
+			const int reservedWidth = kRowLeftMargin + kRowAvatarSize + kRowAvatarSpacing;
+			const int availableWidth = clientW - reservedWidth - kRowRightReserve;
+
+			const int totalRowWidth =
+				kRowAccentIconSize      // 收藏
+				+ kRowIconSize * 2      // 上一曲 + 下一曲
+				+ kRowPlaySize
+				+ kRowGap * 3;
+
+			// availableWidth 不够放下整排时，(availableWidth - totalRowWidth) 会是负数，
+			// 用这个条件表达式兜底为 0，避免整排往左边挤到头像上面去。
+			// 注意：这里不用 std::max —— <windows.h> 在没定义 NOMINMAX 的情况下
+			// 会把 max 定义成一个宏，预处理阶段就把 std::max(...) 替换掉了，
+			// 编译会报语法错误。用普通条件表达式绕开这个宏冲突。
+			const int centerOffset = (availableWidth - totalRowWidth) / 2;
+			const int startX = reservedWidth + (centerOffset > 0 ? centerOffset : 0);
+
+			PlaybackRowLayout layout;
+			layout.centerY = static_cast<int>(vRect.Y) + clientH / 2;
+
+			int cursor = startX;
+			layout.heartX = cursor;    cursor += kRowAccentIconSize + kRowGap;
+			layout.previousX = cursor; cursor += kRowIconSize + kRowGap;
+			layout.playX = cursor;     cursor += kRowPlaySize + kRowGap;
+			layout.nextX = cursor;
+
+			return layout;
+		}
+
 		// 当前选中的循环模式，默认列表循环。点了子菜单里某一项之后会更新这里，
 		// 下次弹菜单时对应项会带勾选标记。
 		UINT s_currentLoopMode = ContextMenuCommand::LoopModeListLoop;
@@ -318,45 +399,18 @@ namespace YuMediaPlayer
 		}
 	}
 
-
+	// ===== 按钮相关实现 =====
 	void DrawPlayButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool isPlaying, bool hovered)
 	{
-		// 使用传入的绘图区尺寸计算按钮位置
-		int clientW = static_cast<int>(vRect.Width);
-		int clientH = static_cast<int>(vRect.Height);
+		// 播放按钮的位置现在跟其它按钮共用同一套布局计算（ComputePlaybackRowLayout），
+		// 不再自己单独算一套坐标，这样才能保证真正跟两边的图标排在同一行上。
+		PlaybackRowLayout layout = ComputePlaybackRowLayout(vRect);
 
-		// 播放按钮大小
-		int buttonSize = 30;
-		// ========================================
-		// 布局：
-		// 左边 10px
-		// 封面 84px
-		// 封面右侧 10px
-		// 剩余区域进行居中
-		// 最后向左偏移 20px
-		// ========================================
+		const int buttonSize = kRowPlaySize;
+		const int buttonX = layout.playX;
+		const int buttonY = layout.centerY - buttonSize / 2;
 
-		const int leftMargin = 10;
-		const int avatarSize = 84;
-		const int avatarRightSpacing = 10;
-
-		const int reservedWidth =
-			leftMargin +
-			avatarSize +
-			avatarRightSpacing;
-
-		const int availableWidth =
-			clientW - reservedWidth;
-
-		// 剩余区域居中 + 向左偏移 20px
-		int buttonX =
-			reservedWidth +
-			(availableWidth - buttonSize) / 2 - 20;
-		// 垂直居中
-		int buttonY =
-			static_cast<int>(vRect.Y) +
-			(clientH - buttonSize) / 2;
-		// 计算按钮区域
+		// 计算按钮区域（用于点击检测）
 		g_playButtonInfo =
 			CalculatePlayButtonRect(buttonX, buttonY, buttonSize);
 
@@ -626,102 +680,57 @@ namespace YuMediaPlayer
 	}
 	void DrawPlaybackButtonsGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, const Gdiplus::RectF& avatarRect, PlaybackButtonsInfo& buttonInfo)
 	{
-		const int clientW = static_cast<int>(vRect.Width);
-		const int clientH = static_cast<int>(vRect.Height);
+		// 跟 DrawPlayButtonGdiplus 共用同一套布局计算，保证收藏/上一曲/下一曲
+		// 这几个图标跟播放按钮真正排在同一条水平线上，彼此之间有 kRowGap 的间距。
+		PlaybackRowLayout layout = ComputePlaybackRowLayout(vRect);
 
-		// ============================
-		// 左侧封面区域
-		// ============================
-		const int leftMargin = 10;
-		const int avatarSize = 84;
-		const int avatarSpacing = 10;
+		auto makeRect = [&](int x, int centerY, int size)
+		{
+			return Gdiplus::RectF(
+				static_cast<float>(x),
+				static_cast<float>(centerY - size / 2),
+				static_cast<float>(size),
+				static_cast<float>(size));
+		};
 
-		const int reservedWidth = leftMargin + avatarSize + avatarSpacing;
+		Gdiplus::RectF heartRect = makeRect(layout.heartX, layout.centerY, kRowAccentIconSize);
+		Gdiplus::RectF previousRect = makeRect(layout.previousX, layout.centerY, kRowIconSize);
+		Gdiplus::RectF nextRect = makeRect(layout.nextX, layout.centerY, kRowIconSize);
 
-		// ============================
-		// 按钮尺寸
-		// ============================
-		const int buttonWidth = 40;   // 增大按钮宽度便于点击
-		const int buttonHeight = 40;
-		const int spacing = 20;       // 按钮之间的间距
-
-		const int totalWidth = buttonWidth + spacing + buttonWidth;
-
-		// ============================
-		// 剩余区域
-		// ============================
-		const int availableWidth = clientW - reservedWidth;
-
-		// 按钮组居中 + 向左偏移 40px
-		const int startX = reservedWidth + (availableWidth - totalWidth) / 2 - 20;
-
-		// 垂直居中
-		const int centerY = static_cast<int>(vRect.Y) + (clientH / 2);
-
-		// ============================
-		// 上一曲按钮区域
-		// ============================
-		Gdiplus::RectF previousRect(
-			static_cast<float>(startX),
-			static_cast<float>(centerY - buttonHeight / 2),
-			static_cast<float>(buttonWidth),
-			static_cast<float>(buttonHeight)
-		);
-
-		// ============================
-		// 下一曲按钮区域
-		// ============================
-		Gdiplus::RectF nextRect(
-			static_cast<float>(startX + buttonWidth + spacing),
-			static_cast<float>(centerY - buttonHeight / 2),
-			static_cast<float>(buttonWidth),
-			static_cast<float>(buttonHeight)
-		);
-		// 右上角按钮 (关闭、最小化) 
-		const int topRightMargin = 0;
-		//const int topMargin = 1;
-		//const int rightMargin = 1;
-		const int buttonSize = 20;
-		const int buttonSpacing = 2;
-
-		// 关闭按钮 (右上角)
+		// 关闭按钮固定在卡片右上角；mini（还原/小窗模式）跟它左右对齐，
+		// 紧挨着排在下面——两个按钮共用同一个 X 坐标，是对齐的一列。
 		Gdiplus::RectF closeRect(
-			static_cast<float>(clientW - topRightMargin - buttonSize),
-			static_cast<float>(topRightMargin + buttonSize),
-			static_cast<float>(buttonSize),
-			static_cast<float>(buttonSize)
+			vRect.GetRight() - kCornerMargin - kCornerButtonSize,
+			vRect.Y + kCornerMargin,
+			static_cast<float>(kCornerButtonSize),
+			static_cast<float>(kCornerButtonSize)
 		);
-		// 最小化按钮 (关闭按钮下面)
 		Gdiplus::RectF miniRect(
-			static_cast<float>(clientW - topRightMargin - buttonSize),
-			static_cast<float>(topRightMargin + buttonSize + buttonSpacing),
-			static_cast<float>(buttonSize),
-			static_cast<float>(buttonSize)
+			closeRect.X,
+			closeRect.Y + closeRect.Height + kCornerSpacing,
+			static_cast<float>(kCornerButtonSize),
+			static_cast<float>(kCornerButtonSize)
 		);
-		// 右侧按钮 (音量、列表) 
-		//const int rightMargin = 15;
-		const float nextButtonRight = nextRect.GetRight(); // 假设下一曲按钮的位置
-		// 音量按钮
-		Gdiplus::RectF soundRect(
-			static_cast<float>(clientW - topRightMargin - buttonSize * 3),
-			static_cast<float>(clientH / 2 - buttonSize / 2),
-			static_cast<float>(buttonSize),
-			static_cast<float>(buttonSize)
-		);
-		// 列表按钮
+
+		// 音量、列表紧挨在 mini 左边，跟 mini 保持同一个垂直中心，
+		// 彼此间留出 kSideGap 的间距。这三个按钮的位置只跟卡片右边缘
+		// 挂钩，完全不受左边那条自动居中横排宽度变化的影响，
+		// 横排再怎么变宽也不会把它们挤到卡片外面去。
+		const float miniCenterY = miniRect.Y + miniRect.Height / 2.0f;
+
 		Gdiplus::RectF listRect(
-			static_cast<float>(clientW - topRightMargin - buttonSize * 2),
-			static_cast<float>(clientH / 2 - buttonSize / 2),
-			static_cast<float>(buttonSize),
-			static_cast<float>(buttonSize)
+			miniRect.X - kSideGap - kRowAccentIconSize,
+			miniCenterY - kRowAccentIconSize / 2.0f,
+			static_cast<float>(kRowAccentIconSize),
+			static_cast<float>(kRowAccentIconSize)
 		);
-		// 左侧按钮 (收藏) 
-		Gdiplus::RectF heartRect(
-			static_cast<float>(leftMargin),
-			static_cast<float>(clientH / 2 - buttonSize / 2),
-			static_cast<float>(buttonSize),
-			static_cast<float>(buttonSize)
+		Gdiplus::RectF soundRect(
+			listRect.X - kSideGap - kRowAccentIconSize,
+			miniCenterY - kRowAccentIconSize / 2.0f,
+			static_cast<float>(kRowAccentIconSize),
+			static_cast<float>(kRowAccentIconSize)
 		);
+
 		// 保存点击区域
 		buttonInfo.heart.rect = heartRect;
 		buttonInfo.sound.rect = soundRect;
@@ -756,8 +765,8 @@ namespace YuMediaPlayer
 		const float iconSize = 10.0f;
 		const float lineWidth = 2.0f;
 
-		const float startX = x + (w - iconSize);
-		const float startY = y;
+		const float startX = x + (w - iconSize) / 2.0f;
+		const float startY = y + (h - iconSize) / 2.0f;
 		const float endX = startX + iconSize;
 		const float endY = startY + iconSize;
 
@@ -789,11 +798,10 @@ namespace YuMediaPlayer
 		// 创建画笔用于绘制框线
 		Gdiplus::Pen iconPen(iconColor, 2.0f);	// 笔宽 2.0f
 		// 矩形框尺寸
-		const int buttonspacing = 3;
 		const float boxWidth = 12.0f;
 		const float boxHeight = 10.0f;
-		const float startX = x + (w - boxWidth);
-		const float startY = y + (h - boxHeight) + buttonspacing;
+		const float startX = x + (w - boxWidth) / 2.0f;
+		const float startY = y + (h - boxHeight) / 2.0f;
 
 		// 绘制矩形框
 		g.DrawRectangle(
@@ -818,10 +826,10 @@ namespace YuMediaPlayer
 			: Gdiplus::Color(235, 235, 235, 235)  // 正常时：浅灰色
 		);
 
-		// 喇叭图标尺寸
-		const float speakerWidth = 6.0f;
-		const float speakerHeight = 8.0f;
-		const float waveWidth = 3.0f;
+		// 喇叭图标尺寸（放大一些，配合外层容器变大）
+		const float speakerWidth = 8.0f;
+		const float speakerHeight = 11.0f;
+		const float waveWidth = 4.0f;
 
 		const float centerX = x + w / 2.0f;
 		const float centerY = y + h / 2.0f;
@@ -870,10 +878,10 @@ namespace YuMediaPlayer
 			: Gdiplus::Color(235, 235, 235, 235)  // 正常时：浅灰色
 		);
 
-		// 列表图标尺寸
-		const float lineWidth = 10.0f;
-		const float lineHeight = 2.0f;
-		const float spacing = 2.0f;
+		// 列表图标尺寸（放大一些，配合外层容器变大）
+		const float lineWidth = 14.0f;
+		const float lineHeight = 2.5f;
+		const float spacing = 2.5f;
 
 		const float startX = x + (w - lineWidth) / 2.0f;
 		const float startY = y + (h - (lineHeight * 3 + spacing * 2)) / 2.0f;
@@ -914,8 +922,8 @@ namespace YuMediaPlayer
 			: Gdiplus::Color(235, 235, 235, 235)  // 正常时：浅灰色
 		);
 
-		// 心形图标尺寸
-		const float heartSize = 8.0f;
+		// 心形图标尺寸（放大一些，配合外层容器变大）
+		const float heartSize = 11.0f;
 		const float centerX = x + w / 2.0f;
 		const float centerY = y + h / 2.0f;
 
@@ -1207,6 +1215,124 @@ namespace YuMediaPlayer
 	AudioPlayer* GetAudioPlayer()
 	{
 		return g_audioPlayer;
+	}
+
+	// ============ 圆形头像右键菜单实现 ============
+
+	namespace
+	{
+		// 圆形头像菜单项文字
+		constexpr wchar_t kAvatarRotateText[] = L"旋转";
+		constexpr wchar_t kAvatarStopText[] = L"停止（复位）";
+
+		// 头像旋转状态
+		static float s_avatarRotation = 0.0f;  // 当前旋转角度
+		static bool s_isRotating = false;      // 是否正在旋转中
+		static UINT_PTR s_rotationTimer = 0;   // 旋转定时器 ID
+	}
+
+	// 显示圆形头像的右键菜单
+	int ShowAvatarContextMenu(HWND hwnd, POINT pt)
+	{
+		HMENU hMenu = CreatePopupMenu();
+
+		// 添加菜单项
+		// 使用与主菜单一致的 OWNERDRAW，这样头像菜单也保持黑底白字。
+		AppendMenuW(hMenu, MF_OWNERDRAW, ContextMenuCommand::AvatarRotate,
+			reinterpret_cast<LPCWSTR>(kAvatarRotateText));
+		AppendMenuW(hMenu, MF_OWNERDRAW, ContextMenuCommand::AvatarStop,
+			reinterpret_cast<LPCWSTR>(kAvatarStopText));
+
+		// 设置菜单背景
+		MENUINFO menuInfo = { sizeof(MENUINFO) };
+		menuInfo.fMask = MIM_BACKGROUND;
+		menuInfo.hbrBack = DarkMenuBackgroundBrush();
+		SetMenuInfo(hMenu, &menuInfo);
+
+		SetForegroundWindow(hwnd);
+
+		int cmd = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD, 
+			pt.x, pt.y, 0, hwnd, NULL);
+
+		PostMessage(hwnd, WM_NULL, 0, 0);
+		DestroyMenu(hMenu);
+
+		return cmd;
+	}
+	// 处理圆形头像菜单命令
+	void HandleAvatarContextMenuCommand(HWND hwnd, int cmd)
+	{
+		switch (cmd)
+		{
+		case ContextMenuCommand::AvatarRotate:
+			StartAvatarRotation(hwnd);
+			break;
+		case ContextMenuCommand::AvatarStop:
+			StopAvatarRotation(hwnd);
+			break;
+		default:
+			break;
+		}
+	}
+	// 启动头像旋转
+	void StartAvatarRotation(HWND hwnd)
+	{
+		if (s_isRotating)
+		{
+			OutputDebugStringW(L"[Avatar] Already rotating\n");
+			return;
+		}
+
+		s_isRotating = true;
+		s_avatarRotation = 0.0f;
+		OutputDebugStringW(L"[Avatar] Started rotating\n");
+
+		// 创建旋转定时器，每 16ms 更新一次（约 60 FPS）
+		s_rotationTimer = SetTimer(hwnd, 3001, 16, nullptr);
+		if (s_rotationTimer == 0)
+		{
+			s_isRotating = false;
+			OutputDebugStringW(L"[Avatar] SetTimer failed\n");
+			return;
+		}
+		InvalidateRect(hwnd, nullptr, FALSE);
+	}
+	// 停止头像旋转并复位到 0 度
+	void StopAvatarRotation(HWND hwnd)
+	{
+		if (s_rotationTimer != 0)
+		{
+			KillTimer(hwnd, s_rotationTimer);
+			s_rotationTimer = 0;
+		}
+
+		s_isRotating = false;
+		s_avatarRotation = 0.0f;
+
+		OutputDebugStringW(L"[Avatar] Stopped and reset to 0 degrees\n");
+		InvalidateRect(hwnd, nullptr, FALSE);
+	}
+	// 处理旋转定时器
+	void HandleAvatarRotationTimer(HWND hwnd, MainWindow* /*pMainWindow*/)
+	{
+		if (!s_isRotating)
+			return;
+
+		s_avatarRotation += 3.0f;
+		if (s_avatarRotation >= 360.0f)
+			s_avatarRotation -= 360.0f;
+
+		InvalidateRect(hwnd, nullptr, FALSE);
+	}
+	// 获取当前头像旋转角度
+	float GetAvatarRotation()
+	{
+		return s_avatarRotation;
+	}
+	// 获取头像是否正在旋转
+	bool IsAvatarRotating()
+	{
+		return s_isRotating;
 	}
 
 }
