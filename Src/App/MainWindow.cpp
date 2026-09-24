@@ -1,6 +1,8 @@
 #include "MainWindow.h"  
 #include <dwmapi.h>
 #include <cstdint>
+#include <cstdio>
+#include <cwchar>
 #include <memory>
 #include <windowsx.h>
 #include <algorithm>
@@ -9,6 +11,9 @@
 #include "UI/WindowGUI.h"
 #include "UI/miniWindowGUI.h"
 #include "NotifyIcon/TrayIcon.h"
+#include "Core/AudioPlayer.h"
+#include "Core/Playlist.h"
+#include "Core/PlaylistPanel.h"
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -22,6 +27,92 @@ namespace YuMediaPlayer
 		return pt.x >= rect.X && pt.x <= rect.X + rect.Width
 			&& pt.y >= rect.Y && pt.y <= rect.Y + rect.Height;
 	}
+
+	// 定义在 miniWindowGUI.cpp：播放按钮圆心的 X 坐标（窗口坐标）。
+	float GetPlayButtonCenterX(const Gdiplus::RectF& vRect);
+
+	// ===== 自动下一首 / 播放列表面板 / 悬停显示按钮 用到的文件内状态 =====
+	// （MainWindow.h 里不需要加任何成员，整个程序只有一个主窗口，用文件内状态就够了。）
+
+	// AudioPlayer 在 MF 工作线程上收到 MESessionEnded 后，用 PostMessage 发给主窗口的消息。
+	// wParam = 那首歌的编号（AudioPlayer::GetTrackGeneration），用来丢弃过期通知。
+	static constexpr UINT WM_YU_TRACK_ENDED = WM_APP + 1;
+
+	static PlaylistPanel s_playlistPanel;   // 展开式播放列表面板
+	static int  s_panelExtraH = 0;          // 面板展开时窗口比"播放器本体"多出的高度；0 = 没展开
+	static int  s_panelShiftUp = 0;         // 屏幕下方放不下时，窗口为此向上挪了多少像素（关闭时挪回来）
+	static bool s_cardHovered = false;      // 鼠标是否在卡片/头像/列表上：在 = 显示按钮，不在 = 显示歌名歌手
+
+	// 鼠标不在卡片上时，按钮是隐藏的，必须把它们的点击区域也挪到屏幕外，
+	// 否则看不见的按钮照样能被点中（WM_NCHITTEST 和 WM_LBUTTONUP 都靠这些矩形判断）。
+	static void HideControlHitAreas()
+	{
+		const Gdiplus::RectF off(-10000.0f, -10000.0f, 0.0f, 0.0f);
+		buttonsInfo.close.rect = off;
+		buttonsInfo.mini.rect = off;
+		buttonsInfo.sound.rect = off;
+		buttonsInfo.list.rect = off;
+		buttonsInfo.heart.rect = off;
+		buttonsInfo.previous.rect = off;
+		buttonsInfo.next.rect = off;
+
+		buttonsInfo.close.hovered = false;
+		buttonsInfo.mini.hovered = false;
+		buttonsInfo.sound.hovered = false;
+		buttonsInfo.list.hovered = false;
+		buttonsInfo.heart.hovered = false;
+		buttonsInfo.previous.hovered = false;
+		buttonsInfo.next.hovered = false;
+
+		g_playButtonInfo.buttonRect.left = -10000;
+		g_playButtonInfo.buttonRect.top = -10000;
+		g_playButtonInfo.buttonRect.right = -10000;
+		g_playButtonInfo.buttonRect.bottom = -10000;
+		g_playButtonInfo.isHovered = false;
+	}
+
+	// 把窗口高度改成"播放器本体高度 + newExtra"（newExtra = 0 就是恢复成没有列表的样子）。
+	// 窗口顶边不动、向下长；屏幕下方放不下时整个窗口往上挪，关闭时再挪回来。
+	static void ResizeWindowForPlaylist(HWND hwnd, int newExtra)
+	{
+		RECT wr;
+		GetWindowRect(hwnd, &wr);
+
+		const int w = wr.right - wr.left;
+		const int baseH = (wr.bottom - wr.top) - s_panelExtraH;
+		const int newH = baseH + newExtra;
+		int top = wr.top;
+
+		if (newExtra > 0)
+		{
+			HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+			MONITORINFO mi = { sizeof(mi) };
+			if (GetMonitorInfo(hMon, &mi))
+			{
+				int shift = top + newH - mi.rcWork.bottom;
+				if (shift > 0)
+				{
+					if (top - shift < mi.rcWork.top)
+						shift = top - mi.rcWork.top;
+					if (shift < 0)
+						shift = 0;
+					top -= shift;
+					s_panelShiftUp = shift;
+				}
+			}
+		}
+		else
+		{
+			top += s_panelShiftUp;
+			s_panelShiftUp = 0;
+		}
+
+		// 必须先改 s_panelExtraH 再 SetWindowPos：SetWindowPos 会同步触发 WM_SIZE -> Composite，
+		// Composite 要用它算"播放器本体高度"。
+		s_panelExtraH = newExtra;
+		SetWindowPos(hwnd, nullptr, wr.left, top, w, newH, SWP_NOZORDER | SWP_NOACTIVATE);
+	}
+
 	MainWindow::MainWindow()
 		: m_hwnd(nullptr)
 		, m_theme()
@@ -41,6 +132,30 @@ namespace YuMediaPlayer
 		{
 			OutputDebugStringW(L"Warning: Audio player init failed\n");
 		}
+		else if (AudioPlayer* player = GetAudioPlayer())
+		{
+			// 曲子自然播完时，AudioPlayer 会给 m_hwnd 发 WM_YU_TRACK_ENDED（见 EventProc）。
+			player->SetEndNotify(m_hwnd, WM_YU_TRACK_ENDED);
+
+			// 诊断：AudioPlayer.cpp 和本文件看到的 AudioPlayer 大小是否一致。
+			// 不一致 = 头文件版本不同（重复的 AudioPlayer.h / 没重新编译的旧 .obj），
+			// 这时跨文件读写成员（比如 GetPlaybackState）会读到乱码。
+			{
+				wchar_t layoutBuf[200];
+				const size_t sizeInCpp = player->DebugSizeOfSelf();
+				const size_t sizeHere = sizeof(AudioPlayer);
+				swprintf_s(layoutBuf, L"[AudioPlayer] sizeof 检查：AudioPlayer.cpp=%zu，MainWindow.cpp=%zu %s\n",
+					sizeInCpp, sizeHere, sizeInCpp == sizeHere ? L"（一致）" : L"（不一致！头文件版本不同，请清理重建）");
+				OutputDebugStringW(layoutBuf);
+			}
+		}
+
+		// 扫描 song\local 建立播放列表。界面先显示第一首歌的封面和歌名（不自动播放），
+		// 后面 Initialize 末尾的 Composite() 会把它画出来。
+		if (m_playlist.LoadDefault() > 0)
+			ApplyTrackToUi(*m_playlist.Current());
+		else
+			OutputDebugStringW(L"Warning: 没有在 song\\local 下找到任何音频文件\n");
 
 		m_windowGUI = std::make_unique<YuMediaPlayer::WindowGUI>();
 		if (!m_windowGUI->InitWindow(title, width, height))
@@ -169,6 +284,38 @@ namespace YuMediaPlayer
 
 	LRESULT MainWindow::EventProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
 	{
+		// 重新判断鼠标是否在"卡片 / 头像 / 展开的列表面板"上；状态变了返回 true（调用者负责重绘）。
+		// 窗口是逐像素透明的分层窗口，卡片外面那圈透明边不算悬停。
+		// 卡片区域的大部分在 HTCAPTION 上，那里只有 WM_NCMOUSEMOVE 没有 WM_MOUSEMOVE，
+		// 所以这里直接用 GetCursorPos 算，不依赖具体收到的是哪种鼠标消息。
+		auto refreshHover = [&]() -> bool
+		{
+			RECT wr;
+			POINT cp;
+			if (!GetWindowRect(hwnd, &wr) || !GetCursorPos(&cp))
+				return false;
+
+			const int x = cp.x - wr.left;
+			const int y = cp.y - wr.top;
+			const int w = wr.right - wr.left;
+			const int bodyH = (wr.bottom - wr.top) - s_panelExtraH;
+
+			bool inside = (x >= 10 && x < w - 10 && y >= 20 && y < bodyH - 10)   // 卡片
+				|| (x >= 18 && x < 102 && y >= 0 && y < 84);                     // 头像
+			if (s_panelExtraH > 0 && x >= 10 && x < w - 10 && y >= bodyH - 6 && y < bodyH + s_panelExtraH)
+				inside = true;                                                    // 列表面板
+			if (m_isCollapsed || m_isAnimating)
+				inside = false;
+
+			if (inside == s_cardHovered)
+				return false;
+
+			s_cardHovered = inside;
+			if (!inside)
+				s_playlistPanel.ClearHover();
+			return true;
+		};
+
 		switch (msg)
 		{
 		case WM_ENTERSIZEMOVE:
@@ -183,6 +330,7 @@ namespace YuMediaPlayer
 		case WM_EXITSIZEMOVE:
 		{
 			m_isMoving = false;
+			s_panelShiftUp = 0;   // 用户自己拖过窗口了，关闭列表时不再自动"挪回去"
 
 			// 收缩状态下，用户可能手动把"小圆"沿边缘拖到了别的位置（比如拖到右下角）。
 			// 这里把拖动后的最新位置同步回 m_savedWindowX/Y，
@@ -220,6 +368,10 @@ namespace YuMediaPlayer
 		{
 			if (wParam == 1001)
 			{
+				// 兜底：鼠标离开窗口时不一定有鼠标消息，靠这个定时器保证按钮/歌名及时切换。
+				if (refreshHover())
+					Composite();
+
 				if (m_isCollapsed && !m_isAnimating)
 					CheckCollapsedMouseHover();
 				else if (!m_isMoving && !m_isAnimating)
@@ -354,10 +506,37 @@ namespace YuMediaPlayer
 			pt.x = GET_X_LPARAM(lParam);
 			pt.y = GET_Y_LPARAM(lParam);
 
+			// 播放列表展开时，先看是不是点中了某一首歌。
+			if (s_playlistPanel.IsOpen())
+			{
+				RECT cr;
+				GetClientRect(hwnd, &cr);
+				const float winW = static_cast<float>(cr.right - cr.left);
+				const float baseH = static_cast<float>((cr.bottom - cr.top) - s_panelExtraH);
+				const int idx = s_playlistPanel.HitTestTrack(m_playlist, winW, baseH, pt);
+				if (idx >= 0)
+				{
+					PlayTrack(idx);   // 内部会换封面/歌名、开始播放并重绘
+					return 0;
+				}
+			}
+
 			if (IsPointInPlayButton(pt, g_playButtonInfo))
 			{
-				std::wstring mp3 = L"song\\local\\周杰伦-七里香.mp3";
+				// 停止状态下点播放，播的是播放列表里"当前这一首"（切歌之后不再是写死的七里香）。
+				// 列表为空（没扫到歌）时退回原来的路径，行为跟以前一致。
+				const Track* cur = m_playlist.Current();
+				std::wstring mp3 = cur ? cur->audioPath : std::wstring(L"song\\local\\周杰伦-七里香.mp3");
+				// 诊断日志：点击前后的播放状态（0=停止 1=播放 2=暂停），排查"图标不切换"时用。
+				AudioPlayer* diagPlayer = GetAudioPlayer();
+				const int stateBefore = diagPlayer ? static_cast<int>(diagPlayer->GetPlaybackState()) : -1;
 				HandlePlayButtonClick(hwnd, mp3);  // 播放/暂停/继续，三种状态它自己会判断
+				{
+					wchar_t diagBuf[160];
+					const int stateAfter = diagPlayer ? static_cast<int>(diagPlayer->GetPlaybackState()) : -1;
+					swprintf_s(diagBuf, L"[PlayButton] 点击前状态=%d，点击后状态=%d（0=停止 1=播放 2=暂停）\n", stateBefore, stateAfter);
+					OutputDebugStringW(diagBuf);
+				}
 				// 之前这里紧接着又调用了一次 TogglePlayPause(hwnd)，
 				// 相当于把刚播放起来的状态又立刻切换了一次（Playing -> Pause），
 				// 导致歌曲一启动就被暂停。HandlePlayButtonClick 已经处理了
@@ -390,7 +569,19 @@ namespace YuMediaPlayer
 			}
 			if (IsPointInRectF(pt, buttonsInfo.list.rect))
 			{
-				HandleListButtonClick(hwnd);
+				// 展开 / 收起播放列表：窗口向下变高，面板画在播放器卡片下面。
+				if (s_playlistPanel.IsOpen())
+				{
+					s_playlistPanel.SetOpen(false);
+					ResizeWindowForPlaylist(hwnd, 0);
+				}
+				else
+				{
+					s_playlistPanel.SetOpen(true);
+					ResizeWindowForPlaylist(hwnd, s_playlistPanel.ExtraHeight(m_playlist.Count()));
+					s_playlistPanel.EnsureVisible(m_playlist);
+				}
+				Composite();
 				return 0;
 			}
 			if (IsPointInRectF(pt, buttonsInfo.heart.rect))
@@ -398,16 +589,16 @@ namespace YuMediaPlayer
 				HandleHeartButtonClick(hwnd);
 				return 0;
 			}
-			/*if (IsPointInRectF(pt, buttonsInfo.previous.rect))
+			if (IsPointInRectF(pt, buttonsInfo.previous.rect))
 			{
-				HandlePreviousButtonClick(hwnd);
+				PlayPreviousTrack();
 				return 0;
 			}
 			if (IsPointInRectF(pt, buttonsInfo.next.rect))
 			{
-				HandleNextButtonClick(hwnd);
+				PlayNextTrack();
 				return 0;
-			}*/
+			}
 			return 0;
 		}
 		case WM_MOUSEMOVE:
@@ -416,6 +607,10 @@ namespace YuMediaPlayer
 			GetCursorPos(&pt);
 			m_lastMousePos = pt;
 			m_lastMouseMoveTick = GetTickCount();
+
+			// 订阅"鼠标离开客户区"通知（一次性的，每次移动都重新订阅）。
+			TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+			TrackMouseEvent(&tme);
 
 			if (m_isCollapsed)
 				CheckCollapsedMouseHover();
@@ -430,6 +625,21 @@ namespace YuMediaPlayer
 			// UpdateLayeredWindow 一次性推上去的，没有独立的子窗口，
 						// 所以悬停状态变了就得整体重画（Composite），不能只 InvalidateRect。
 			bool anyHoverChanged = (wasPlayHovered != g_playButtonInfo.isHovered);
+
+			// 鼠标进入/离开卡片：切换"按钮"和"歌名歌手"。
+			if (refreshHover())
+				anyHoverChanged = true;
+
+			// 列表面板里悬停的那一行。
+			if (s_playlistPanel.IsOpen())
+			{
+				RECT cr;
+				GetClientRect(hwnd, &cr);
+				const float winW = static_cast<float>(cr.right - cr.left);
+				const float baseH = static_cast<float>((cr.bottom - cr.top) - s_panelExtraH);
+				if (s_playlistPanel.UpdateHover(m_playlist, winW, baseH, pt))
+					anyHoverChanged = true;
+			}
 
 			auto updateHover = [&](ControlButtonInfo& btn)
 				{
@@ -464,6 +674,22 @@ namespace YuMediaPlayer
 			//
 			//return 0;
 		
+		case WM_NCMOUSEMOVE:
+		{
+			// 鼠标在 HTCAPTION（可拖动的卡片区域）上移动时只有非客户区消息。
+			TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE | TME_NONCLIENT, hwnd, 0 };
+			TrackMouseEvent(&tme);
+			if (refreshHover())
+				Composite();
+			break;   // 交给系统默认处理（拖动等）
+		}
+		case WM_MOUSELEAVE:
+		case WM_NCMOUSELEAVE:
+		{
+			if (refreshHover())
+				Composite();
+			break;
+		}
 		case WM_NCHITTEST:
 		{
 			const LONG border = 6; 
@@ -475,7 +701,8 @@ namespace YuMediaPlayer
 			bool left = pt.x < wr.left + border;
 			bool right = pt.x >= wr.right - border;
 			bool top = pt.y < wr.top + border;
-			bool bottom = pt.y >= wr.bottom - border;
+			// 列表展开时窗口下半部分是列表面板，不当作可拖拽的下边缘。
+			bool bottom = (s_panelExtraH == 0) && pt.y >= wr.bottom - border;
 		/*	bool middle = !left && !right && !top && !bottom;
 			bool middleTop = !left && !right && top;
 			bool middleBottom = !left && !right && bottom;
@@ -519,11 +746,53 @@ namespace YuMediaPlayer
 			}
 
 			// 标题栏（用于拖动） - 卡片顶部区域
-			if (pt.y >= wr.bottom - 70 && pt.y < wr.bottom)
+			// 列表展开时，"播放器本体"的底边是 wr.bottom - s_panelExtraH，拖动区要按它算，
+			// 面板区域走下面的 HTCLIENT，这样才能收到点击和悬停。
+			const LONG bodyBottom = wr.bottom - s_panelExtraH;
+			if (pt.y >= bodyBottom - 70 && pt.y < bodyBottom)
 			{
 				return HTCAPTION;
 			}
 			return HTCLIENT;
+		}
+		case WM_MOUSEWHEEL:
+		{
+			// 列表展开时，滚轮滚动歌曲行。
+			if (s_playlistPanel.IsOpen())
+			{
+				const int rows = GET_WHEEL_DELTA_WPARAM(wParam) > 0 ? -1 : 1;
+				if (s_playlistPanel.Scroll(m_playlist, rows))
+					Composite();
+				return 0;
+			}
+			break;
+		}
+		case WM_YU_TRACK_ENDED:
+		{
+			// 一首歌自然播完了（AudioPlayer 在 MF 线程上收到 MESessionEnded 后 PostMessage 过来）。
+			AudioPlayer* player = GetAudioPlayer();
+			if (!player)
+				return 0;
+
+			// 通知里带着"那首歌的编号"。编号跟现在不一样，说明通知排队期间用户已经手动切歌了，
+			// 这是上一首遗留的过期通知，忽略。
+			if (static_cast<unsigned int>(wParam) != player->GetTrackGeneration())
+				return 0;
+
+			if (m_playlist.Empty())
+			{
+				player->Stop();
+				Composite();
+				return 0;
+			}
+
+			// 单曲循环：重播当前这首；列表循环 / 随机 / 心动循环：下一首
+			// （随机模式下 PlayNextTrack 里会随机挑，列表循环到末尾回到第一首）。
+			if (GetCurrentLoopMode() == ContextMenuCommand::LoopModeSingleLoop)
+				PlayTrack(m_playlist.CurrentIndex());
+			else
+				PlayNextTrack();
+			return 0;
 		}
 		case WM_GETMINMAXINFO:
 		{
@@ -563,7 +832,9 @@ namespace YuMediaPlayer
 			return DefWindowProc(hwnd, msg, wParam, lParam);
 		}
 
-		//return DefWindowProc(hwnd, msg, wParam, lParam);
+		// 上面好几个 case 是 break 出 switch 的（WM_TIMER 的未知 ID、WM_NCRBUTTONUP 没点中标题栏、
+		// WM_NCCALCSIZE 的 wParam==0 等），必须在这里兜底返回，否则函数没有返回值（未定义行为）。
+		return DefWindowProc(hwnd, msg, wParam, lParam);
 	}
 
 	void MainWindow::StartCollapseAnimation()
@@ -835,7 +1106,8 @@ namespace YuMediaPlayer
 	}
 	void MainWindow::CollapseAtEdgeRect(const RECT& wr)
 	{
-		if (m_isCollapsed || m_isAnimating)
+		// 播放列表展开时不做贴边收起（收起逻辑假定窗口只有播放器本体那么高）。
+		if (m_isCollapsed || m_isAnimating || s_panelExtraH > 0)
 			return;
 
 		HMONITOR hMon = MonitorFromRect(&wr, MONITOR_DEFAULTTONEAREST);
@@ -1345,7 +1617,10 @@ namespace YuMediaPlayer
 			else
 			{
 				// 正常状态：绘制背景卡片。
-				Gdiplus::RectF cardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
+				// 播放列表展开时窗口比播放器本体高 s_panelExtraH，卡片和按钮布局只按本体高度算，
+				// 多出来的那一截留给列表面板。
+				const int bodyH = h - s_panelExtraH;
+				Gdiplus::RectF cardRect(10.0f, 20.0f, (float)w - 20.0f, (float)bodyH - 30.0f);
 				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
 
 				Gdiplus::GraphicsPath path;
@@ -1363,13 +1638,22 @@ namespace YuMediaPlayer
 				Gdiplus::RectF avatarRect(18.0f, 0.0f, 84.0f, 84.0f);
 				drawAvatar(avatarRect);
 
-				// 绘制歌曲信息。
-				Gdiplus::RectF textCardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
-				DrawTrackInfoGdiplus(g, textCardRect, avatarRect);
-				// 绘制播放按钮。
-				Gdiplus::RectF vRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
-				DrawPlayButtonGdiplus(g, vRect, false, false);
-				DrawPlaybackButtonsGdiplus(g, vRect, avatarRect, buttonsInfo);
+				// 跟 QQ 音乐一样：鼠标不在卡片上时显示歌名 + 歌手，
+				// 鼠标放上来（或者列表展开着）时换成播放控制按钮。
+				Gdiplus::RectF vRect(10.0f, 20.0f, (float)w - 20.0f, (float)bodyH - 30.0f);
+				if (s_cardHovered || s_playlistPanel.IsOpen())
+				{
+					DrawPlayButtonGdiplus(g, vRect, false, false);
+					DrawPlaybackButtonsGdiplus(g, vRect, avatarRect, buttonsInfo);
+				}
+				else
+				{
+					HideControlHitAreas();
+					DrawTrackInfoGdiplus(g, vRect, avatarRect);
+				}
+
+				// 展开的播放列表面板（没展开时 Draw 什么都不画）。
+				s_playlistPanel.Draw(g, m_playlist, (float)w, (float)bodyH);
 			}
 		}
 
@@ -1396,41 +1680,57 @@ namespace YuMediaPlayer
 		}
 	}
 
-	void MainWindow::DrawTrackInfoGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& cardRect, const Gdiplus::RectF& avatarRect)
+	void MainWindow::DrawTrackInfoGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& cardRect, const Gdiplus::RectF& /*avatarRect*/)
 	{
-		// 在卡片右侧、头像旁边绘制歌名和歌手信息
+		// 歌名 + 歌手：以"播放按钮的圆心"为中线水平居中——鼠标放上去时按钮出现在这个位置，
+		// 切换前后视觉重心不跳。中线取自按钮布局本身（GetPlayButtonCenterX），
+		// 以后改按钮布局，文字会自动跟着走。
 		if (m_trackTitle.empty() && m_trackArtist.empty())
 			return;
 
-		float textX = avatarRect.GetRight() + 15.0f;
-		float textWidth = cardRect.GetRight() - textX - 10.0f;
-		float cardCenterY = cardRect.Y + (cardRect.Height / 2.0f);
+		// 左边至少留 10 + 84 + 10 = 104px 给旋转封面，右边到卡片右边缘。
+		const float areaLeft = 10.0f + 84.0f + 10.0f;
+		const float areaRight = cardRect.GetRight();
+		const float centerX = GetPlayButtonCenterX(cardRect);
+		const float innerPad = 6.0f;   // 太长的歌名用 ... 截断时不贴边
 
-		if (textWidth <= 0)
+		// 以中线为轴左右对称：半宽取"中线到左边界"和"中线到右边界"里小的那个，
+		// 这样既不会压到封面，也不会超出卡片，同时保证严格居中在中线上。
+		float halfW = centerX - areaLeft;
+		if (areaRight - centerX < halfW)
+			halfW = areaRight - centerX;
+		halfW -= innerPad;
+		const float cardCenterY = cardRect.Y + (cardRect.Height / 2.0f);
+
+		if (halfW <= 0)
 			return;
 
-		Gdiplus::StringFormat stringFormat;
-		stringFormat.SetAlignment(Gdiplus::StringAlignmentNear);
-		stringFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-		stringFormat.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+		const float textX = centerX - halfW;
+		const float textWidth = halfW * 2.0f;
+
+		Gdiplus::StringFormat format;
+		format.SetAlignment(Gdiplus::StringAlignmentCenter);      // 水平居中
+		format.SetLineAlignment(Gdiplus::StringAlignmentNear);    // 垂直位置由下面自己算
+		format.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+		format.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
 
 		Gdiplus::Font titleFont(L"Microsoft YaHei UI", 11.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
 		Gdiplus::Font artistFont(L"Microsoft YaHei UI", 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
 		Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 255, 255));
 		Gdiplus::SolidBrush artistBrush(Gdiplus::Color(200, 200, 200));
 
-		bool hasBoth = !m_trackTitle.empty() && !m_trackArtist.empty();
+		const bool hasBoth = !m_trackTitle.empty() && !m_trackArtist.empty();
 		if (hasBoth)
 		{
-			float titleH = titleFont.GetHeight(&g);
-			float artistH = artistFont.GetHeight(&g);
-			float totalH = titleH + artistH - 2.0f;
-			float startY = cardCenterY - totalH / 2.0f;
+			const float titleH = titleFont.GetHeight(&g);
+			const float artistH = artistFont.GetHeight(&g);
+			const float totalH = titleH + artistH - 2.0f;
+			const float startY = cardCenterY - totalH / 2.0f;
 
 			g.DrawString(m_trackTitle.c_str(), -1, &titleFont,
-				Gdiplus::PointF(textX, startY), &titleBrush);
+				Gdiplus::RectF(textX, startY, textWidth, titleH), &format, &titleBrush);
 			g.DrawString(m_trackArtist.c_str(), -1, &artistFont,
-				Gdiplus::PointF(textX, startY + titleH - 2.0f), &artistBrush);
+				Gdiplus::RectF(textX, startY + titleH - 2.0f, textWidth, artistH), &format, &artistBrush);
 		}
 		else
 		{
@@ -1438,9 +1738,10 @@ namespace YuMediaPlayer
 			Gdiplus::Font& font = m_trackTitle.empty() ? artistFont : titleFont;
 			Gdiplus::SolidBrush& brush = m_trackTitle.empty() ? artistBrush : titleBrush;
 
-			float h = font.GetHeight(&g);
-			float startY = cardCenterY - h / 2.0f;
-			g.DrawString(single.c_str(), -1, &font, Gdiplus::PointF(textX, startY), &brush);
+			const float h = font.GetHeight(&g);
+			const float startY = cardCenterY - h / 2.0f;
+			g.DrawString(single.c_str(), -1, &font,
+				Gdiplus::RectF(textX, startY, textWidth, h), &format, &brush);
 		}
 	}
 	void MainWindow::RestoreWindow()
@@ -1483,6 +1784,77 @@ namespace YuMediaPlayer
 		m_trackTitle = title;
 		m_trackArtist = artist;
 		Composite();
+	}
+
+	// ===== 播放列表 / 上一曲 / 下一曲 =====
+
+	// 把一首歌对应的封面、歌名、歌手、进度环复位应用到界面上。
+	// 注意这里不调用 Composite()——调用者（PlayTrack / Initialize）
+	// 会在合适的时机统一重绘一次。
+	void MainWindow::ApplyTrackToUi(const Track& track)
+	{
+		// 这首歌没有找到同名封面：明确清空，回到黑胶占位样式，
+		// 否则上一首歌的封面会一直留在界面上。
+		// （LoadImageFromFile 加载失败时内部也会先清掉旧图，所以两条路径的结果一致。）
+		if (track.coverPath.empty())
+		{
+			m_avatar.ClearImage();
+		}
+		else if (!m_avatar.LoadImageFromFile(track.coverPath))
+		{
+			OutputDebugStringW((L"[MainWindow] 封面加载失败：" + track.coverPath + L"\n").c_str());
+		}
+
+		// 新的一首，进度环归零。
+		m_avatar.SetProgress(0.0f);
+
+		m_trackTitle = track.title;
+		m_trackArtist = track.artist;
+	}
+
+	// 切到第 index 首并立即开始播放（不管之前是播放、暂停还是停止）。
+	// 头像旋转状态（右键菜单里的"旋转"）不受影响：正在转就继续转，只是换了张封面。
+	void MainWindow::PlayTrack(int index)
+	{
+		if (!m_playlist.SetCurrent(index))
+			return;
+
+		const Track& track = *m_playlist.Current();
+		s_playlistPanel.EnsureVisible(m_playlist);   // 列表展开着的话，保证当前这首在可见范围内
+
+		// 先换封面和歌名，再播放，最后统一重绘一次——
+		// 这样重绘时播放按钮读到的已经是"播放中"的最终状态，不会闪一下旧图标。
+		ApplyTrackToUi(track);
+
+		if (AudioPlayer* player = GetAudioPlayer())
+		{
+			if (!player->Play(track.audioPath))
+			{
+				OutputDebugStringW((L"[MainWindow] 播放失败：" + track.audioPath + L"\n").c_str());
+			}
+		}
+
+		Composite();
+	}
+
+	void MainWindow::PlayNextTrack()
+	{
+		if (m_playlist.Empty())
+			return;
+
+		// 随机播放模式下"下一首"是随机挑的；其它模式（列表循环/单曲循环/心动循环）
+		// 手动点下一首都是顺序往后走，到末尾回到第一首。
+		const bool shuffle = (GetCurrentLoopMode() == ContextMenuCommand::LoopModeShuffle);
+		PlayTrack(m_playlist.MoveNext(shuffle));
+	}
+
+	void MainWindow::PlayPreviousTrack()
+	{
+		if (m_playlist.Empty())
+			return;
+
+		const bool shuffle = (GetCurrentLoopMode() == ContextMenuCommand::LoopModeShuffle);
+		PlayTrack(m_playlist.MovePrevious(shuffle));
 	}
 
 

@@ -66,11 +66,32 @@ namespace YuMediaPlayer
 		// 设置音量 (0.0 - 1.0)
 		bool SetVolume(float volume);
 
+		// 设置"曲目自然播完"时要通知的窗口和消息。
+		// 必须在 Initialize() 成功之后调用（回调对象是在 Initialize() 里创建的）。
+		// 会话在 MF 工作线程上收到 MESessionEnded 时，用 PostMessage 给 hwnd 发 msg，
+		// WPARAM = 当时的曲目编号（见 GetTrackGeneration）。
+		void SetEndNotify(HWND hwnd, UINT msg);
+
+		// 当前是"第几首歌"的编号，每次 Play() 加一。
+		// 界面线程收到"播完了"通知后，拿通知里的编号跟这个值比较，
+		// 不一致说明是上一首遗留的过期通知，应该直接忽略。
+		unsigned int GetTrackGeneration() const;
+
+		// 诊断用：返回"AudioPlayer.cpp 编译时看到的" sizeof(AudioPlayer)。
+		// 调用方拿它跟自己的 sizeof(AudioPlayer) 比较，不一致说明不同 .cpp 用的头文件版本不一样
+		// （重复的头文件，或者没重新编译的旧 .obj）。
+		size_t DebugSizeOfSelf() const;
+
 	private:
 		ComPtr<IMFMediaSession> m_mediaSession;
 		ComPtr<IMFMediaSource> m_mediaSource;
 		ComPtr<IMFTopology> m_topology;
 		ComPtr<IMFSimpleAudioVolume> m_audioVolume;
+
+		// 会话事件回调对象（AudioPlayer.cpp 里匿名命名空间中的 SessionEventCallback）。
+		// 故意声明成基类 IMFAsyncCallback*，这样头文件不用暴露具体实现类；
+		// 由 Initialize() 创建（持有创建时的那 1 个引用），Cleanup() 里 Release()。
+		IMFAsyncCallback* m_eventCallback = nullptr;
 
 		PlaybackState m_playbackState;
 		long long m_duration;
@@ -90,16 +111,19 @@ namespace YuMediaPlayer
 		std::wstring ResolveExistingFilePath(const std::wstring& path) const;
 
 		// Start()/Resume() 都是异步的：调用之后立刻返回 S_OK 不代表真的开始出声了，
-		// 音频渲染器（SAR）的实际创建/激活是在 MF 自己的工作线程上异步完成的，
-		// 一旦失败，如果不监听事件，代码是完全看不到的——按钮照样会被当成"正在播放"。
-		// 这个函数同步等待会话事件，收到 MEError 或者带错误状态的事件就判定失败，
-		// 并把具体 HRESULT 打到 OutputDebugString 里，方便定位到底是哪一步炸了。
+		// 音频渲染器（SAR）的实际创建/激活是在 MF 自己的工作线程上异步完成的。
+		// 会话事件现在由 m_eventCallback（异步 BeginGetEvent）统一接收，
+		// 这个函数带超时地等回调设置的标志位；收到错误事件或超时就判定失败，
+		// 具体 HRESULT 会打到 OutputDebugString。
+		// 调用前要先 Arm 对应的标志（见 AudioPlayer.cpp 里的 ArmSessionEvent）。
+		// maxEventsToCheck 参数保留只是为了兼容旧签名，已经不再使用。
 		bool WaitForSessionEvent(MediaEventType expectedType, int maxEventsToCheck = 10);
 
-		// 只重置跟上一首歌绑定的对象（媒体源/拓扑/音量接口），保留
-		// m_mediaSession 不动。Play() 每次播放新文件时调用这个，而不是
-		// 调用会把 m_mediaSession 一并干掉的 Cleanup()。
-		void ResetForNewTrack();
+		// 播放新的一首之前调用：完整关闭旧会话（Close -> Shutdown 媒体源 -> Shutdown 会话），
+		// 再创建一个全新的会话并重新订阅事件。不复用会话，是因为复用后从第二首歌开始
+		// MESessionStarted 会带着 MF_E_SHUTDOWN 失败。Initialize() 刚创建、还没播放过的会话
+		// 会被直接沿用。失败返回 false。
+		bool ResetForNewTrack();
 
 		// 清理资源（含 m_mediaSession），只应该在析构时调用一次
 		void Cleanup();

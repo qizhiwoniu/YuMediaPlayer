@@ -6,6 +6,7 @@
 #include "NotifyIcon/TrayIcon.h"
 #include "Core/Theme.h"
 #include "Core/CircularAvatar.h"
+#include "Core/Playlist.h"
 
 class TrayIcon;
 
@@ -29,7 +30,9 @@ namespace YuMediaPlayer
 		void SetAvatarSkin(const CircularAvatar::Skin& skin);
 		// 设置当前歌曲信息（歌名/歌手），显示在封面右侧
 		void SetTrackInfo(const std::wstring& title, const std::wstring& artist);
-
+		void PlayTrack(int index);
+		void PlayNextTrack();
+		void PlayPreviousTrack();
 	private:
 		// 把卡片(圆角面板)、头像(进度环+封面)、文字，全部画到 m_dibBits 这张
 		// 带 Alpha 通道的位图上，再用 UpdateLayeredWindow 一次性推给系统显示。
@@ -106,7 +109,9 @@ namespace YuMediaPlayer
 		int                           m_animationTargetWidth = 0; // 动画目标宽度
 		int                           m_animationStartWidth = 0;  // 动画起始宽度
 		bool                          m_animationIsCollapsing = false; // true = 收起动画，false = 展开动画
-
+	private:
+		void ApplyTrackToUi(const Track& track);
+		Playlist m_playlist;
 	private:
 		//std::unique_ptr<TrayIcon> m_trayIcon;
 		std::unique_ptr<YuMediaPlayer::WindowGUI> m_windowGUI;

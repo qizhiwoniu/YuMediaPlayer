@@ -405,6 +405,16 @@ namespace YuMediaPlayer
 		}
 	}
 
+	// 播放按钮圆心的 X 坐标（窗口坐标）。跟 DrawPlayButtonGdiplus 用同一套布局计算，
+	// 给 MainWindow 用来把歌名/歌手对齐到播放按钮正上方——按钮隐藏（鼠标不在卡片上）时
+	// g_playButtonInfo 已经被清掉，没法从它取，所以单独提供这个函数。
+	// vRect 传跟 DrawPlayButtonGdiplus 一样的卡片矩形。
+	float GetPlayButtonCenterX(const Gdiplus::RectF& vRect)
+	{
+		const PlaybackRowLayout layout = ComputePlaybackRowLayout(vRect);
+		return static_cast<float>(layout.playX) + kRowPlaySize / 2.0f;
+	}
+
 	// ===== 按钮相关实现 =====
 	void DrawPlayButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool isPlaying, bool hovered)
 	{

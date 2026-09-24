@@ -3,6 +3,11 @@
 #include <cstdio>
 #include <cstdarg>
 #include <mferror.h>
+#include <mutex>
+#include <condition_variable>
+#include <atomic>
+#include <chrono>
+#include <new>
 
 #pragma comment(lib, "mfplat.lib")
 #pragma comment(lib, "mfreadwrite.lib")
@@ -113,6 +118,253 @@ namespace
 		}
 		CoTaskMemFree(activates);
 	}
+
+	// ------------------------------------------------------------------
+	// 会话事件回调（异步）
+	//
+	// 之前的做法是在需要的地方同步调用 IMFMediaSession::GetEvent() 去"等"某个事件
+	// （Play/Resume 里等 MESessionStarted）。这有两个根本问题：
+	//   1) 只有在你主动去等的那一刻才能看到事件——曲子自然播完时没人在等，
+	//      MESessionEnded 就悄悄躺在队列里，永远没人处理，所以没法自动切下一首。
+	//   2) 同步 GetEvent 和异步 BeginGetEvent 不能同时用（后者挂着的时候前者会
+	//      直接失败），所以要收 MESessionEnded，就必须把整个事件处理都改成异步。
+	//
+	// 现在的做法：会话一创建就调用 BeginGetEvent 订阅，之后所有事件都由 Media Foundation
+	// 的工作线程调用下面的 Invoke()。这个类做两件事：
+	//   - 把 Started/Stopped/TopologiesCleared/Closed 这些"我在等它发生"的事件记成标志位，
+	//     让界面线程的 Play()/切歌/关闭可以带超时地等（Arm + Wait），不会卡死；
+	//   - 收到 MESessionEnded 时，用 PostMessage 通知界面窗口（不是 SendMessage，
+	//     所以工作线程不会被界面线程卡住）。
+	// ------------------------------------------------------------------
+	class SessionEventCallback final : public IMFAsyncCallback
+	{
+	public:
+		enum : unsigned
+		{
+			FlagStarted = 1u << 0,
+			FlagStopped = 1u << 1,
+			FlagTopologiesCleared = 1u << 2,
+			FlagClosed = 1u << 3,
+			FlagError = 1u << 4,
+		};
+
+		enum class State { Idle, Started, Paused, Stopped, Ended };
+
+		// ---- IUnknown ----
+		STDMETHODIMP QueryInterface(REFIID riid, void** ppv) override
+		{
+			if (!ppv)
+				return E_POINTER;
+			if (riid == __uuidof(IMFAsyncCallback) || riid == __uuidof(IUnknown))
+			{
+				*ppv = static_cast<IMFAsyncCallback*>(this);
+				AddRef();
+				return S_OK;
+			}
+			*ppv = nullptr;
+			return E_NOINTERFACE;
+		}
+		STDMETHODIMP_(ULONG) AddRef() override { return static_cast<ULONG>(InterlockedIncrement(&m_ref)); }
+		STDMETHODIMP_(ULONG) Release() override
+		{
+			LONG c = InterlockedDecrement(&m_ref);
+			if (c == 0)
+				delete this;
+			return static_cast<ULONG>(c);
+		}
+
+		// ---- IMFAsyncCallback ----
+		STDMETHODIMP GetParameters(DWORD*, DWORD*) override { return E_NOTIMPL; } // 用默认线程/队列
+
+		STDMETHODIMP Invoke(IMFAsyncResult* result) override
+		{
+			// BeginGetEvent 时把会话本身当作 state 传了进来，这里取回它。
+			// 这样即使 AudioPlayer 已经开始销毁，这次回调手里也有一个有效引用。
+			IUnknown* state = nullptr;
+			IMFMediaEventGenerator* gen = nullptr;
+			result->GetState(&state);
+			if (state)
+			{
+				state->QueryInterface(IID_PPV_ARGS(&gen));
+				state->Release();
+			}
+			if (!gen)
+				return S_OK;
+
+			bool keepListening = true;
+
+			IMFMediaEvent* ev = nullptr;
+			HRESULT hr = gen->EndGetEvent(result, &ev);
+			if (SUCCEEDED(hr) && ev)
+			{
+				MediaEventType type = MEUnknown;
+				HRESULT status = S_OK;
+				ev->GetType(&type);
+				ev->GetStatus(&status);
+				HandleEvent(type, status);
+
+				// MESessionClosed 是会话生命周期里的最后一个事件，之后不能再订阅。
+				if (type == MESessionClosed)
+					keepListening = false;
+				ev->Release();
+			}
+			else
+			{
+				// 会话已经被关掉/销毁了（MF_E_SHUTDOWN 之类），不用再订阅。
+				keepListening = false;
+			}
+
+			if (keepListening)
+				gen->BeginGetEvent(this, gen);
+
+			gen->Release();
+			return S_OK;
+		}
+
+		// ---- 给 AudioPlayer 用的接口 ----
+
+		// 设置"曲目自然播完"时要通知的窗口和消息。
+		void SetNotify(HWND hwnd, UINT msg)
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_notifyHwnd = hwnd;
+			m_notifyMsg = msg;
+		}
+
+		// 在发起异步操作（Start/Stop/ClearTopologies/Close）之前调用：清掉对应的旧标志，
+		// 否则上一次残留的标志会让 Wait 立刻"成功返回"。
+		void Arm(unsigned flags)
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_flags &= ~(flags | FlagError);
+		}
+
+		// 等标志位出现，最多等 timeoutMs 毫秒。出现返回 true；超时或期间收到错误返回 false。
+		bool Wait(unsigned flag, DWORD timeoutMs)
+		{
+			std::unique_lock<std::mutex> lock(m_mutex);
+			m_cv.wait_for(lock, std::chrono::milliseconds(timeoutMs),
+				[&] { return (m_flags & (flag | FlagError)) != 0; });
+			return (m_flags & flag) != 0;
+		}
+
+		State GetState()
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			return m_state;
+		}
+
+		// "第几首歌"的编号。每次 Play() 加一；MESessionEnded 的通知会带上当时的编号，
+		// 界面线程收到通知时拿它跟当前编号比，不一致说明这是上一首歌遗留的过期通知，直接忽略
+		// （比如通知还在消息队列里排队，用户就手动点了下一首）。
+		unsigned int Generation() const { return m_generation.load(); }
+		void BumpGeneration() { ++m_generation; }
+
+		// 换了一个全新的会话之后调用：清掉上一个会话遗留的标志位和状态。
+		void ResetState()
+		{
+			std::lock_guard<std::mutex> lock(m_mutex);
+			m_flags = 0;
+			m_state = State::Idle;
+		}
+
+	private:
+		void HandleEvent(MediaEventType type, HRESULT status)
+		{
+			HWND notifyHwnd = nullptr;
+			UINT notifyMsg = 0;
+			bool notifyEnded = false;
+			bool codecMissing = false;
+
+			{
+				std::lock_guard<std::mutex> lock(m_mutex);
+
+				if (type == MEError || FAILED(status))
+				{
+					m_flags |= FlagError;
+					DebugLogf(L"[AudioPlayer] 会话事件报告失败：type=%d, status=0x%08X\n", (int)type, (unsigned)status);
+					codecMissing = (status == MF_E_TOPO_CODEC_NOT_FOUND);
+				}
+
+				switch (type)
+				{
+				case MESessionStarted:
+					if (SUCCEEDED(status))
+					{
+						m_flags |= FlagStarted;
+						m_state = State::Started;
+					}
+					break;
+				case MESessionPaused:
+					m_state = State::Paused;
+					break;
+				case MESessionStopped:
+					m_flags |= FlagStopped;
+					m_state = State::Stopped;
+					break;
+				case MESessionTopologiesCleared:
+					m_flags |= FlagTopologiesCleared;
+					break;
+				case MESessionClosed:
+					m_flags |= FlagClosed;
+					break;
+				case MESessionEnded:
+					m_state = State::Ended;
+					notifyEnded = true;
+					notifyHwnd = m_notifyHwnd;
+					notifyMsg = m_notifyMsg;
+					break;
+				default:
+					break;
+				}
+			}
+			m_cv.notify_all();
+
+			// 下面这些在锁外面做：LogAvailableMp3Decoders 比较慢，PostMessage 也没必要占着锁。
+			if (codecMissing)
+				LogAvailableMp3Decoders();
+
+			if (notifyEnded && notifyHwnd && notifyMsg)
+				PostMessageW(notifyHwnd, notifyMsg, static_cast<WPARAM>(m_generation.load()), 0);
+		}
+
+		LONG m_ref = 1;   // 创建者持有 1 个引用
+		std::mutex m_mutex;
+		std::condition_variable m_cv;
+		unsigned m_flags = 0;
+		State m_state = State::Idle;
+		HWND m_notifyHwnd = nullptr;
+		UINT m_notifyMsg = 0;
+		std::atomic<unsigned int> m_generation{ 0 };
+	};
+
+	SessionEventCallback* AsCallback(IMFAsyncCallback* p)
+	{
+		return static_cast<SessionEventCallback*>(p);
+	}
+
+	unsigned FlagForEvent(MediaEventType type)
+	{
+		switch (type)
+		{
+		case MESessionStarted:           return SessionEventCallback::FlagStarted;
+		case MESessionStopped:           return SessionEventCallback::FlagStopped;
+		case MESessionTopologiesCleared: return SessionEventCallback::FlagTopologiesCleared;
+		case MESessionClosed:            return SessionEventCallback::FlagClosed;
+		default:                         return 0;
+		}
+	}
+
+	// 发起异步操作之前调用，见 SessionEventCallback::Arm。
+	void ArmSessionEvent(IMFAsyncCallback* cb, MediaEventType type)
+	{
+		if (cb)
+		{
+			const unsigned flag = FlagForEvent(type);
+			if (flag)
+				AsCallback(cb)->Arm(flag);
+		}
+	}
 }
 
 namespace YuMediaPlayer
@@ -182,18 +434,70 @@ namespace YuMediaPlayer
 			return false;
 		}
 
+		// 订阅会话事件（异步）。之后所有事件都走 SessionEventCallback::Invoke，
+		// 不能再对这个会话调用同步的 GetEvent。
+		SessionEventCallback* callback = new (std::nothrow) SessionEventCallback();
+		if (!callback)
+		{
+			m_mediaSession.Reset();
+			MFShutdown();
+			return false;
+		}
+		m_eventCallback = callback;   // 创建时的那 1 个引用由 AudioPlayer 持有，Cleanup 里释放
+
+		hr = m_mediaSession->BeginGetEvent(m_eventCallback, m_mediaSession.Get());
+		if (FAILED(hr))
+		{
+			DebugLogf(L"[AudioPlayer] BeginGetEvent failed, hr=0x%08X\n", hr);
+			m_eventCallback->Release();
+			m_eventCallback = nullptr;
+			m_mediaSession.Reset();
+			MFShutdown();
+			return false;
+		}
+
 		return true;
+	}
+
+	void AudioPlayer::SetEndNotify(HWND hwnd, UINT msg)
+	{
+		if (m_eventCallback)
+			AsCallback(m_eventCallback)->SetNotify(hwnd, msg);
+		else
+			DebugLogf(L"[AudioPlayer] SetEndNotify 要在 Initialize() 成功之后调用\n");
+	}
+
+	unsigned int AudioPlayer::GetTrackGeneration() const
+	{
+		return m_eventCallback ? AsCallback(m_eventCallback)->Generation() : 0;
+	}
+
+	size_t AudioPlayer::DebugSizeOfSelf() const
+	{
+		return sizeof(AudioPlayer);
 	}
 
 	bool AudioPlayer::Play(const std::wstring& filePath)
 	{
-		if (!m_mediaSession)
+		if (!m_eventCallback)
 		{
-			DebugLogf(L"[AudioPlayer] m_mediaSession 为空，Initialize() 是不是没成功/没被调用？\n");
+			DebugLogf(L"[AudioPlayer] 事件回调为空，Initialize() 是不是没成功/没被调用？\n");
 			return false;
 		}
 
-		ResetForNewTrack();
+		// 每首歌都用一个全新的会话（旧会话在这里被完整关闭）。
+		if (!ResetForNewTrack())
+			return false;
+
+		// 新的一首：编号 +1，让上一首遗留的"播完了"通知作废。
+		// 必须放在旧会话关闭之后：旧会话关闭期间还在处理的事件（比如刚好播完的 MESessionEnded）
+		// 发出的通知带的是旧编号，加一之后就自然过期了。
+		AsCallback(m_eventCallback)->BumpGeneration();
+
+		// 在创建拓扑、Start 之前就 Arm（清掉旧的 Started/Error 标志），而不是等到 Start 之前：
+		// 拓扑解析失败（比如缺解码器）的错误事件可能在 SetTopology 之后、Start 之前就到了，
+		// 如果 Arm 放得太晚，这个错误标志会被清掉，真正的失败原因就丢了。
+		ArmSessionEvent(m_eventCallback, MESessionStarted);
 
 		// ------------------------------------------------------------
 		// 先把路径解析成一个真正存在的绝对路径。之前是直接把调用者传进来的
@@ -322,26 +626,35 @@ namespace YuMediaPlayer
 	bool AudioPlayer::Pause()
 	{
 		if (m_playbackState != PlaybackState::Playing || !m_mediaSession)
+		{
+			DebugLogf(L"[AudioPlayer] Pause() 被忽略：当前状态=%d（0=停止 1=播放 2=暂停）\n", (int)m_playbackState);
 			return false;
+		}
 
 		HRESULT hr = m_mediaSession->Pause();
 		if (SUCCEEDED(hr))
 		{
 			m_playbackState = PlaybackState::Paused;
+			DebugLogf(L"[AudioPlayer] 已暂停\n");
 			return true;
 		}
+		DebugLogf(L"[AudioPlayer] Pause() 失败, hr=0x%08X\n", hr);
 		return false;
 	}
 
 	bool AudioPlayer::Resume()
 	{
 		if (m_playbackState != PlaybackState::Paused || !m_mediaSession)
+		{
+			DebugLogf(L"[AudioPlayer] Resume() 被忽略：当前状态=%d（0=停止 1=播放 2=暂停）\n", (int)m_playbackState);
 			return false;
+		}
 
 		PROPVARIANT startPosition;
 		PropVariantInit(&startPosition);
 		startPosition.vt = VT_EMPTY;
 
+		ArmSessionEvent(m_eventCallback, MESessionStarted);
 		HRESULT hr = m_mediaSession->Start(&GUID_NULL, &startPosition);
 		PropVariantClear(&startPosition);
 
@@ -358,6 +671,7 @@ namespace YuMediaPlayer
 		}
 
 		m_playbackState = PlaybackState::Playing;
+		DebugLogf(L"[AudioPlayer] 已继续播放\n");
 		return true;
 	}
 
@@ -634,89 +948,135 @@ namespace YuMediaPlayer
 		return L"";
 	}
 
-	bool AudioPlayer::WaitForSessionEvent(MediaEventType expectedType, int maxEventsToCheck)
+	bool AudioPlayer::WaitForSessionEvent(MediaEventType expectedType, int /*maxEventsToCheck*/)
 	{
-		if (!m_mediaSession)
+		// 签名保持不变（Play/Resume 里的调用不用改），但内部不再同步读事件队列，
+		// 而是等 SessionEventCallback 在 MF 工作线程上设置的标志位。
+		// 调用前要先 ArmSessionEvent(...)，见上面 Play/Resume。
+		if (!m_mediaSession || !m_eventCallback)
 			return false;
 
-		for (int i = 0; i < maxEventsToCheck; ++i)
+		const unsigned flag = FlagForEvent(expectedType);
+		if (flag == 0)
 		{
-			ComPtr<IMFMediaEvent> event;
-			// GetEvent(0, ...) 会同步阻塞直到下一个事件到达（0 表示不带
-			// MF_EVENT_FLAG_NO_WAIT）。正常情况下 MESessionStarted 几十
-			// 毫秒内就会来，不会明显卡住界面；这是为了简单直接换来"能
-			// 确认播放到底成没成功"，属于有意的取舍，不是长期最佳实践
-			// （更完整的做法是用 IMFAsyncCallback 完全异步处理）。
-			HRESULT hr = m_mediaSession->GetEvent(0, &event);
-			if (FAILED(hr) || !event)
-			{
-				DebugLogf(L"[AudioPlayer] GetEvent failed, hr=0x%08X\n", hr);
-				return false;
-			}
-
-			MediaEventType type = MEUnknown;
-			event->GetType(&type);
-
-			HRESULT eventStatus = S_OK;
-			event->GetStatus(&eventStatus);
-
-			if (type == MEError || FAILED(eventStatus))
-			{
-				DebugLogf(L"[AudioPlayer] 会话事件报告失败：type=%d, status=0x%08X\n", (int)type, eventStatus);
-				return false;
-			}
-
-			if (type == expectedType)
-			{
-				return true;
-			}
-			// 其它无关事件（比如拓扑状态变化）直接忽略，继续等下一个。
+			DebugLogf(L"[AudioPlayer] WaitForSessionEvent 不支持等待事件类型 %d\n", (int)expectedType);
+			return false;
 		}
 
-		DebugLogf(L"[AudioPlayer] 等了 %d 个事件还没等到期望的事件(type=%d)，按失败处理\n", maxEventsToCheck, (int)expectedType);
-		return false;
+		// 最多等 3 秒。正常情况下几十毫秒就到；超时或收到错误事件都按失败处理。
+		if (!AsCallback(m_eventCallback)->Wait(flag, 3000))
+		{
+			DebugLogf(L"[AudioPlayer] 等待会话事件(type=%d)超时或收到错误，按失败处理\n", (int)expectedType);
+			return false;
+		}
+		return true;
 	}
 
-	void AudioPlayer::ResetForNewTrack()
+	bool AudioPlayer::ResetForNewTrack()
 	{
-		// 只清掉"跟上一首歌绑定"的那些对象——媒体源、拓扑、音量接口，
-		// 不动 m_mediaSession。IMFMediaSession 本来就是设计成可以反复
-		// SetTopology/Start 来播放不同文件的，不需要每次播放新文件都
-		// 把整个会话关掉重建。
-		if (m_mediaSource)
+		// ------------------------------------------------------------
+		// 每首歌都关掉旧会话、创建一个全新的会话。
+		//
+		// 之前的做法是复用同一个会话：Stop -> ClearTopologies -> Shutdown 旧媒体源 ->
+		// SetTopology(新) -> Start。实际运行时第二首歌开始就会失败：
+		//   MESessionStarted 带着 status=0xC00D3E85（MF_E_SHUTDOWN，
+		//   "请求无效，因为已经调用过 Shutdown()"），而且之后每一首都失败，
+		//   说明复用的会话里还残留着对已经 Shutdown 的旧对象的引用。
+		// 微软自己的播放器示例（CPlayer::OpenURL）也是每次打开新文件都先 CloseSession
+		// 再重新创建会话，这里照着做。代价是切歌多花几十毫秒，但不会再有"残留状态"的问题。
+		//
+		// 关闭顺序（标准做法）：Close -> 等 MESessionClosed -> Shutdown 媒体源 -> Shutdown 会话。
+		// ------------------------------------------------------------
+		SessionEventCallback* cb = m_eventCallback ? AsCallback(m_eventCallback) : nullptr;
+
+		// 只有会话真的播放过东西（有拓扑或媒体源）才需要关；Initialize() 刚创建的全新会话直接用。
+		if (m_mediaSession && (m_topology || m_mediaSource))
 		{
-			m_mediaSource->Shutdown();
-			m_mediaSource.Reset();
+			if (cb)
+				cb->Arm(SessionEventCallback::FlagClosed);
+
+			if (SUCCEEDED(m_mediaSession->Close()) && cb)
+			{
+				if (!cb->Wait(SessionEventCallback::FlagClosed, 2000))
+					DebugLogf(L"[AudioPlayer] 切歌：等 MESessionClosed 超时\n");
+			}
+
+			if (m_mediaSource)
+			{
+				m_mediaSource->Shutdown();
+				m_mediaSource.Reset();
+			}
+			m_mediaSession->Shutdown();
+			m_mediaSession.Reset();
 		}
+
+		m_mediaSource.Reset();
 		m_topology.Reset();
 		m_audioVolume.Reset();
 		m_playbackState = PlaybackState::Stopped;
 		m_duration = 0;
+
+		if (m_mediaSession)
+			return true;   // 复用刚创建、还没用过的会话
+
+		// 创建新会话，并重新订阅事件（回调对象本身是同一个，会话换了要重新 BeginGetEvent）。
+		if (!cb)
+			return false;
+
+		HRESULT hr = MFCreateMediaSession(nullptr, &m_mediaSession);
+		if (FAILED(hr))
+		{
+			DebugLogf(L"[AudioPlayer] 切歌：MFCreateMediaSession failed, hr=0x%08X\n", hr);
+			return false;
+		}
+
+		cb->ResetState();
+		hr = m_mediaSession->BeginGetEvent(m_eventCallback, m_mediaSession.Get());
+		if (FAILED(hr))
+		{
+			DebugLogf(L"[AudioPlayer] 切歌：BeginGetEvent failed, hr=0x%08X\n", hr);
+			m_mediaSession.Reset();
+			return false;
+		}
+		return true;
 	}
 
 	void AudioPlayer::Cleanup()
 	{
 		// 真正的、完整的资源释放，只应该在对象销毁时调用一次。
-		// ------------------------------------------------------------
-		// 重点修复：这里之前被 Play() 在"每次播放新文件"时也调用了一遍
-		// （Play() 的第一行就是 Cleanup()）。而 m_mediaSession 只在
-		// Initialize() 里创建过一次，Cleanup() 却会把它 Close()+Reset()
-		// 成空指针——也就是说，从第一次点击播放开始，Play() 函数自己
-		// 先把 m_mediaSession 干掉了，然后函数后面还在用这个已经是空
-		// 指针的 m_mediaSession 去 CreateTopology、去 Start()。
-		// 这正是"点了播放、按钮看起来变成暂停图标，但完全没有声音"的
-		// 根本原因。现在 Play() 改成调用 ResetForNewTrack()（不动
-		// m_mediaSession），真正的 Cleanup() 只在析构时调用一次。
-		// ------------------------------------------------------------
+		// 标准关闭顺序：Close 会话 -> 等 MESessionClosed -> Shutdown 媒体源 -> Shutdown 会话。
+		if (m_mediaSession)
+		{
+			SessionEventCallback* cb = m_eventCallback ? AsCallback(m_eventCallback) : nullptr;
+			if (cb)
+				cb->Arm(SessionEventCallback::FlagClosed);
+
+			if (SUCCEEDED(m_mediaSession->Close()) && cb)
+			{
+				if (!cb->Wait(SessionEventCallback::FlagClosed, 2000))
+					DebugLogf(L"[AudioPlayer] 关闭会话：等 MESessionClosed 超时\n");
+			}
+		}
+
 		if (m_mediaSource)
 		{
 			m_mediaSource->Shutdown();
 		}
 		if (m_mediaSession)
 		{
-			m_mediaSession->Close();
+			m_mediaSession->Shutdown();
 			m_mediaSession.Reset();
 		}
+
+		// 回调对象：释放创建时的那 1 个引用。如果 MF 内部还有挂着的 BeginGetEvent
+		// 引用，对象会在它们释放后才真正销毁——回调里没有指向 AudioPlayer 的指针，
+		// 所以不会访问已销毁的对象。
+		if (m_eventCallback)
+		{
+			m_eventCallback->Release();
+			m_eventCallback = nullptr;
+		}
+
 		m_mediaSource.Reset();
 		m_topology.Reset();
 		m_audioVolume.Reset();
