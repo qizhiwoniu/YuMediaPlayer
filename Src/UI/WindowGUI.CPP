@@ -275,7 +275,7 @@ namespace YuMediaPlayer
 		case WM_CLOSE:
 			// 用户点击关闭按钮
 			// 这里可以选择隐藏而不是销毁
-			HideWindowGUI();
+			CloseToMini();
 			return 0;
 		case WM_PAINT:
 		{
@@ -390,7 +390,7 @@ namespace YuMediaPlayer
 			if (PtInRect(&m_buttonRects[static_cast<int>(ButtonType::Close)], pt))
 			{
 				// 关闭按钮
-				HideWindowGUI();
+				CloseToMini();
 				return 0;
 			}
 			else if (PtInRect(&m_buttonRects[static_cast<int>(ButtonType::Maximize)], pt))
@@ -628,5 +628,25 @@ namespace YuMediaPlayer
 		);
 
 		ShowWindow(m_hwnd, SW_HIDE);
+	}
+
+	// Close main window: hide it, then bring the mini player window back.
+	void WindowGUI::SetMiniWindow(HWND miniHwnd)
+	{
+		m_miniHwnd = miniHwnd;
+	}
+
+	void WindowGUI::CloseToMini()
+	{
+		HideWindowGUI();
+
+		if (m_miniHwnd && ::IsWindow(m_miniHwnd))
+		{
+			if (::IsIconic(m_miniHwnd))
+				::ShowWindow(m_miniHwnd, SW_RESTORE);
+			::ShowWindow(m_miniHwnd, SW_SHOW);
+			::SetWindowPos(m_miniHwnd, HWND_TOPMOST, 0, 0, 0, 0,
+				SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+		}
 	}
 }

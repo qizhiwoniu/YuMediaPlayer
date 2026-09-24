@@ -12,6 +12,7 @@ namespace YuMediaPlayer
 	{
 		Gdiplus::RectF rect;
 		bool hovered = false;
+		bool active = false;   // 选中状态。目前只有收藏按钮用：true = 当前这首已收藏（画实心红心）
 	};
 	// 播放按钮状态和位置信息
 	struct PlayButtonInfo
@@ -36,7 +37,8 @@ namespace YuMediaPlayer
 		ControlButtonInfo heart;    // 收藏按钮
 	};
 	// 右键菜单的命令 ID，MainWindow 根据 ShowMiniPlayerContextMenu 的返回值
-	// 判断用户点了哪一项。
+	// 判断用户点了哪一项，然后自己调用 HandleMiniPlayerContextMenuCommand 去执行
+	// （ShowMiniPlayerContextMenu 内部只负责"循环模式"这种自己记状态的选项，不再重复执行命令）。
 	namespace ContextMenuCommand
 	{
 		constexpr UINT MenuItem1 = 1001;
@@ -70,9 +72,14 @@ namespace YuMediaPlayer
 	int ShowAvatarContextMenu(HWND hwnd, POINT pt);
 	// 处理圆形头像菜单命令
 	void HandleAvatarContextMenuCommand(HWND hwnd, int cmd);
-	// 启动头像旋转
+	// 用户在右键菜单里手动选"旋转"：清除"用户手动停止过"的标记并开始旋转
 	void StartAvatarRotation(HWND hwnd);
-	// 停止头像旋转并复位
+	// 开始播放音乐时调用：自动让封面转起来。
+	// 如果用户之前在右键菜单里手动选过"停止（复位）"，这里什么都不做（尊重用户的选择，
+	// 直到他再次从右键菜单选"旋转"）。已经在转的话也什么都不做。
+	void AutoStartAvatarRotation(HWND hwnd);
+	// 用户在右键菜单里手动选"停止（复位）"：停止旋转、角度归零，并记住这是用户主动停的。
+	// 只影响封面动画，完全不碰音乐播放。
 	void StopAvatarRotation(HWND hwnd);
 	// 处理旋转定时器（在 MainWindow 的 WM_TIMER 中调用）
 	void HandleAvatarRotationTimer(HWND hwnd, MainWindow* pMainWindow);
@@ -100,8 +107,8 @@ namespace YuMediaPlayer
 	void DrawSoundButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered);
 	// 绘制列表按钮
 	void DrawListButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered);
-	// 绘制收藏按钮
-	void DrawHeartButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered);
+	// 绘制收藏按钮：favorited=false 画空心描边心形，favorited=true 画实心红心
+	void DrawHeartButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered, bool favorited = false);
 
 	// ===== 按钮点击处理函数 =====
 

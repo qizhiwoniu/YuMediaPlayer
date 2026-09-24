@@ -459,7 +459,7 @@ static void EnableDarkPopupMenu()
                 if (::IsWindowVisible(hwnd))
                 {
                     // 当前显示 → 隐藏
-                    m_windowGUI->HideWindowGUI();
+                    m_windowGUI->CloseToMini();   // 隐藏主窗口并把迷你窗口弄回来
                 }
                 else
                 {

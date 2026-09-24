@@ -1,5 +1,6 @@
 #include "Core/CircularAvatar.h"
 #include <algorithm>
+#include <cmath>
 #include <vector>
 
 using namespace Gdiplus;
@@ -39,6 +40,44 @@ namespace
     // 没有手动设置封面时，默认从 Assets\disk\ 下加载的图片文件名。
     // 想换成别的文件名/格式，改这一个常量就行。
     const wchar_t* const DEFAULT_COVER_FILENAME = L"周杰伦-七里香.png";
+
+    // 封面只会显示在 80 像素左右的圆里，但用户给的封面常常是 1000x1000 甚至更大。
+    // 封面旋转时每一帧都要把它重新采样一遍，直接拿大图转，CPU 占用会很明显。
+    // 所以加载完成后一次性缩小成"短边 256 像素"的副本（保持长宽比），之后每帧只画小图。
+    // 顺带好处：缩小后的副本不再占着原图文件（GDI+ 的 Bitmap(文件名) 会一直锁着文件）。
+    // 传入的 src 由这个函数接管：缩小成功会 delete src 并返回新图，不需要缩小则原样返回 src。
+    Bitmap* ShrinkCoverIfHuge(Bitmap* src)
+    {
+        const UINT kMaxShortSide = 256;
+        const UINT w = src->GetWidth();
+        const UINT h = src->GetHeight();
+        const UINT shortSide = (std::min)(w, h);
+        if (shortSide <= kMaxShortSide)
+            return src;
+
+        const double scale = static_cast<double>(kMaxShortSide) / shortSide;
+        const UINT nw = (std::max)(1u, static_cast<UINT>(w * scale + 0.5));
+        const UINT nh = (std::max)(1u, static_cast<UINT>(h * scale + 0.5));
+
+        Bitmap* dst = new Bitmap(static_cast<INT>(nw), static_cast<INT>(nh), PixelFormat32bppPARGB);
+        if (dst->GetLastStatus() != Ok)
+        {
+            delete dst;
+            return src;
+        }
+
+        {
+            Graphics g(dst);
+            g.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+            g.SetPixelOffsetMode(PixelOffsetModeHalf);
+            g.SetCompositingMode(CompositingModeSourceCopy);
+            g.DrawImage(src, Rect(0, 0, static_cast<INT>(nw), static_cast<INT>(nh)),
+                0, 0, static_cast<INT>(w), static_cast<INT>(h), UnitPixel);
+        }
+
+        delete src;
+        return dst;
+    }
 }
 
 ULONG_PTR CircularAvatar::s_gdiplusToken = 0;
@@ -102,7 +141,7 @@ bool CircularAvatar::LoadImageFromFile(const std::wstring& path)
         Bitmap* bmp = new Bitmap(candidate.c_str());
         if (bmp->GetLastStatus() == Ok)
         {
-            m_pImage = bmp;
+            m_pImage = ShrinkCoverIfHuge(bmp);
             return true;
         }
         delete bmp;
@@ -193,13 +232,29 @@ void CircularAvatar::Draw(Gdiplus::Graphics& graphics, const Gdiplus::RectF& rec
             graphics.GetClip(&oldClip);
             graphics.SetClip(&clipRegion);
 
+            // 封面内容（图片 / 黑胶 / 纯色占位）绕内圆中心旋转。
+            // 注意必须在 SetClip 之后再加旋转变换：剪裁区域是按"当前变换"在 SetClip 那一刻
+            // 固定下来的，之后变换怎么转，圆形剪裁边界都不动，封面就是"在圆窗口里转"。
+            // Save/Restore 把旋转限制在这一段里，后面的描边、以及进度环都不受影响。
+            GraphicsState contentState = graphics.Save();
+            if (std::fabs(m_rotation) > 0.001f)
+            {
+                const float rotCx = inset + innerW / 2.0f;
+                const float rotCy = inset + innerH / 2.0f;
+                graphics.TranslateTransform(rotCx, rotCy);
+                graphics.RotateTransform(m_rotation);
+                graphics.TranslateTransform(-rotCx, -rotCy);
+                graphics.SetInterpolationMode(InterpolationModeHighQualityBilinear);
+            }
+
             if (m_pImage)
             {
                 UINT imgW = m_pImage->GetWidth();
                 UINT imgH = m_pImage->GetHeight();
                 if (imgW > 0 && imgH > 0)
                 {
-                    double scale = (std::max)((double)innerW / imgW, (double)innerH / imgH);
+                    // 多放大 2%：图片旋转时它的边缘不能碰到圆形剪裁边界，否则会露出一丝半透明的细缝。
+                    double scale = (std::max)((double)innerW / imgW, (double)innerH / imgH) * 1.02;
                     double drawW = imgW * scale;
                     double drawH = imgH * scale;
                     double drawX = inset + (innerW - drawW) / 2.0;
@@ -236,6 +291,9 @@ void CircularAvatar::Draw(Gdiplus::Graphics& graphics, const Gdiplus::RectF& rec
                 SolidBrush placeholder(m_skin.placeholderColor);
                 graphics.FillEllipse(&placeholder, inset, inset, innerW, innerH);
             }
+
+            // 封面内容画完了，撤销旋转变换（同时恢复到内圆剪裁）。
+            graphics.Restore(contentState);
 
             if (m_skin.borderColor.GetA() > 0)
             {

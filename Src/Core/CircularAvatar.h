@@ -43,6 +43,12 @@ public:
     // 清空封面图，恢复占位圆
     void ClearImage();
 
+    // 设置封面旋转角度（度，顺时针，任意值都行）。
+    // 只有中间的封面图 / 黑胶占位会跟着转；进度环和外沿描边保持不动，
+    // 这样播放进度始终从正上方 12 点方向开始，不会跟着封面一起转圈。
+    void SetRotation(float degrees) { m_rotation = degrees; }
+    float GetRotation() const { return m_rotation; }
+
     // 设置播放进度，范围 [0, 1]
     void SetProgress(float progress01);
     float GetProgress() const { return m_progress; }
@@ -73,6 +79,7 @@ public:
 private:
     Gdiplus::Bitmap* m_pImage = nullptr;
     float m_progress = 0.0f;
+    float m_rotation = 0.0f;   // 封面旋转角度（度）
     Skin  m_skin;
 
     ClickCallback m_onClick = nullptr;

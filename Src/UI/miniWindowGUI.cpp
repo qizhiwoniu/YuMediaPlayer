@@ -7,7 +7,11 @@
 
 namespace YuMediaPlayer
 {
-	WindowGUI* m_windowGUI = nullptr;
+	// 注意：这里以前有一个文件内的全局变量 WindowGUI* m_windowGUI，初值 nullptr，而且整个工程里
+	// 从来没有人给它赋过值——它跟 MainWindow 里的成员 m_windowGUI（unique_ptr）是两个毫不相干的东西。
+	// HandleMiniButtonClick 和"完整模式"菜单项都在判断这个永远为空的全局指针，
+	// 所以 mini 按钮点了没反应、主窗口永远不会显示。
+	// 现在全部改成使用调用者（MainWindow）传进来的 windowGUI 参数，这个全局变量删掉了。
 
 	// 播放按钮信息（缓存）。真正的定义在 MainWindow.cpp，这里用 extern 共享
 	// 同一个对象——之前这里单独定义了一份放在匿名命名空间里（内部链接），
@@ -282,13 +286,14 @@ namespace YuMediaPlayer
 		// 不需要再单独 DestroyMenu(hLoopSubMenu)。
 		DestroyMenu(hMenu);
 
+		// 这里只处理"循环模式"（它的状态就存在本文件里）。
+		// 其它菜单项不在这里执行：MainWindow 拿到返回值后会自己调用
+		// HandleMiniPlayerContextMenuCommand(hwnd, cmd, windowGUI)。
+		// 之前这里也调了一次（而且没传 windowGUI），MainWindow 再调一次，同一个命令会被执行两遍——
+		// 一旦"完整模式"能正常工作，显示→隐藏会连续切换两次，看起来又是"没反应"。
 		if (IsLoopModeCommand(static_cast<UINT_PTR>(cmd)))
 		{
 			s_currentLoopMode = static_cast<UINT>(cmd);
-		}
-		else if (cmd != 0)
-		{
-			HandleMiniPlayerContextMenuCommand(hwnd, cmd);
 		}
 
 		return cmd;
@@ -304,13 +309,13 @@ namespace YuMediaPlayer
 
 		case ContextMenuCommand::MenuItem2:
 		{
-			if (!m_windowGUI)
+			if (!windowGUI)
 			{
-				
+				OutputDebugStringW(L"[Menu] 完整模式：windowGUI 为空，MainWindow 没有把主窗口对象传进来\n");
 				break;
 			}
 
-			HWND windowHwnd = m_windowGUI->GetHWND();
+			HWND windowHwnd = windowGUI->GetHWND();
 
 			if (!::IsWindow(windowHwnd))
 			{
@@ -319,11 +324,14 @@ namespace YuMediaPlayer
 
 			if (::IsWindowVisible(windowHwnd) && !::IsIconic(windowHwnd))
 			{
-				m_windowGUI->HideWindowGUI();
+				windowGUI->HideWindowGUI();
 			}
 			else
 			{
-				m_windowGUI->ShowWindowGUI();
+				// 最小化状态下 SW_SHOW 不会把窗口还原，先还原再显示。
+				if (::IsIconic(windowHwnd))
+					::ShowWindow(windowHwnd, SW_RESTORE);
+				windowGUI->ShowWindowGUI();
 			}
 
 			break;
@@ -755,7 +763,7 @@ namespace YuMediaPlayer
 		buttonInfo.mini.rect = miniRect;
 		buttonInfo.previous.rect = previousRect;
 		buttonInfo.next.rect = nextRect;
-		DrawHeartButtonGdiplus(g, heartRect, buttonInfo.heart.hovered);
+		DrawHeartButtonGdiplus(g, heartRect, buttonInfo.heart.hovered, buttonInfo.heart.active);
 		DrawSoundButtonGdiplus(g, soundRect, buttonInfo.sound.hovered);
 		DrawListButtonGdiplus(g, listRect, buttonInfo.list.hovered);
 		DrawCloseButtonGdiplus(g, closeRect, buttonInfo.close.hovered);
@@ -924,61 +932,68 @@ namespace YuMediaPlayer
 		g.FillEllipse(&noteBrush, noteX, noteY, noteSize, noteSize);
 
 	}
-	void DrawHeartButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered)
+	void DrawHeartButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered, bool favorited)
 	{
-		const float x = vRect.X;
-		const float y = vRect.Y;
-		const float w = vRect.Width;
-		const float h = vRect.Height;
+		// 之前是用 9 个点的多边形硬凑的心形，边是直的、顶部也没有凹口，看起来根本不像心。
+		// 现在改成两段三次贝塞尔曲线画的矢量心形——跟 QQ 音乐 / 网易云音乐用的那种
+		// "两个圆润的上叶 + 顶部小凹口 + 底部尖角"的心形是同一类。
+		//
+		// 形状数据取自 Bootstrap Icons 的 heart-fill（MIT 许可），SVG 路径是：
+		//   M8 1.314 C12.438 -3.248 23.534 4.735 8 15  C-7.534 4.736 3.562 -3.248 8 1.314 Z
+		// viewBox 是 16x16，曲线实际占的范围是 x:0~16、y:0~15。
+		// 不需要 svg/png 图片文件：GDI+ 本身不能读 svg，而直接画矢量路径任意大小都清晰，
+		// 还能随意改颜色（空心/实心/悬停高亮），不用再带资源文件。
+		constexpr float kSrcW = 16.0f;
+		constexpr float kSrcH = 15.0f;
 
-		// 根据悬停状态选择颜色（心形可以根据是否收藏改变颜色）
-		Gdiplus::SolidBrush iconBrush(
-			hovered
-			? Gdiplus::Color(255, 255, 100, 100)  // 悬停时：红色
-			: Gdiplus::Color(235, 235, 235, 235)  // 正常时：浅灰色
-		);
+		Gdiplus::GraphicsPath path;
+		path.AddBezier(8.0f, 1.314f, 12.438f, -3.248f, 23.534f, 4.735f, 8.0f, 15.0f);
+		path.AddBezier(8.0f, 15.0f, -7.534f, 4.736f, 3.562f, -3.248f, 8.0f, 1.314f);
+		path.CloseFigure();
 
-		// 心形图标尺寸（放大一些，配合外层容器变大）
-		const float heartSize = 11.0f;
-		const float centerX = x + w / 2.0f;
-		const float centerY = y + h / 2.0f;
+		// 图标整体视觉宽度（像素）。收藏按钮的格子是 kRowAccentIconSize(30)，心形占 17 左右比较舒服。
+		const float visualW = 17.0f;
+		const float penW = 1.7f;   // 空心描边粗细
 
-		// 绘制心形（使用多边形近似）
-		// 心形的上半部分（两个圆角方块）和下半部分（三角形）
-		Gdiplus::PointF heartPoints[10];
+		// 描边是压在路径正中间的，向外会多出 penW/2；空心状态把路径缩小一圈，
+		// 这样空心和实心两种状态最终看起来一样大，切换时不会"跳一下"。
+		const float pathW = favorited ? visualW : (visualW - penW);
+		const float scale = pathW / kSrcW;
 
-		// 左上圆弧对应的点
-		heartPoints[0] = Gdiplus::PointF(centerX - heartSize / 2.0f, centerY - heartSize / 4.0f);
-		heartPoints[1] = Gdiplus::PointF(centerX - heartSize / 2.0f - 1.0f, centerY - heartSize / 2.0f);
-		heartPoints[2] = Gdiplus::PointF(centerX - heartSize / 4.0f, centerY - heartSize / 2.0f - 1.0f);
+		const float cx = vRect.X + vRect.Width / 2.0f;
+		const float cy = vRect.Y + vRect.Height / 2.0f;
 
-		// 右上圆弧对应的点
-		heartPoints[3] = Gdiplus::PointF(centerX + heartSize / 4.0f, centerY - heartSize / 2.0f - 1.0f);
-		heartPoints[4] = Gdiplus::PointF(centerX + heartSize / 2.0f + 1.0f, centerY - heartSize / 2.0f);
-		heartPoints[5] = Gdiplus::PointF(centerX + heartSize / 2.0f, centerY - heartSize / 4.0f);
+		// 把 (kSrcW/2, kSrcH/2) 这个中心点平移到按钮格子中心，再整体缩放。
+		Gdiplus::Matrix fit(scale, 0.0f, 0.0f, scale,
+			cx - kSrcW / 2.0f * scale,
+			cy - kSrcH / 2.0f * scale);
+		path.Transform(&fit);
 
-		// 右边的尖端
-		heartPoints[6] = Gdiplus::PointF(centerX + heartSize / 3.0f, centerY + heartSize / 4.0f);
+		const Gdiplus::SmoothingMode oldMode = g.GetSmoothingMode();
+		g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
-		// 底部尖端
-		heartPoints[7] = Gdiplus::PointF(centerX, centerY + heartSize / 2.0f);
-
-		// 左边的尖端
-		heartPoints[8] = Gdiplus::PointF(centerX - heartSize / 3.0f, centerY + heartSize / 4.0f);
-
-		// 闭合点
-		heartPoints[9] = heartPoints[0];
-
-		// 绘制心形
-		g.FillPolygon(&iconBrush, heartPoints, 9);
-
-		// 如果需要只显示轮廓（未收藏状态）
-		Gdiplus::Pen heartPen(&iconBrush, 1.0f);
-		if (!hovered)  // 非悬停时显示轮廓
+		if (favorited)
 		{
-			g.DrawPolygon(&heartPen, heartPoints, 9);
+			// 已收藏：实心红心（网易云红），悬停时稍微亮一点
+			Gdiplus::SolidBrush fillBrush(
+				hovered
+				? Gdiplus::Color(255, 255, 92, 92)
+				: Gdiplus::Color(255, 236, 65, 65));
+			g.FillPath(&fillBrush, &path);
+		}
+		else
+		{
+			// 未收藏：空心描边心形，悬停时变白，跟其它图标的悬停效果一致
+			Gdiplus::Pen outlinePen(
+				hovered
+				? Gdiplus::Color(255, 255, 255, 255)
+				: Gdiplus::Color(235, 235, 235, 235),
+				penW);
+			outlinePen.SetLineJoin(Gdiplus::LineJoinRound);
+			g.DrawPath(&outlinePen, &path);
 		}
 
+		g.SetSmoothingMode(oldMode);
 	}
 	void HandleCloseButtonClick(HWND hwnd)
 	{
@@ -986,11 +1001,28 @@ namespace YuMediaPlayer
 	}
 	void HandleMiniButtonClick(HWND hwnd, WindowGUI* windowGUI)
 	{
-		if (m_windowGUI)
+		// mini 按钮：把迷你播放器藏起来，切换到 WindowGUI 主窗口。
+		// 以前这里判断的是一个永远为 nullptr 的全局变量，参数 windowGUI 被无视了，
+		// 所以点了什么都不会发生（详见文件开头的说明）。
+		if (!windowGUI)
 		{
-			ShowWindow(hwnd, SW_HIDE);
-			m_windowGUI->ShowWindowGUI();
+			OutputDebugStringW(L"[Mini] windowGUI 为空：MainWindow 没有把主窗口对象传进来\n");
+			return;
 		}
+
+		HWND fullWnd = windowGUI->GetHWND();
+		if (!fullWnd || !::IsWindow(fullWnd))
+		{
+			OutputDebugStringW(L"[Mini] WindowGUI 的窗口句柄无效（InitWindow 是否成功？）\n");
+			return;
+		}
+
+		// 先把主窗口显示出来，确认能显示了再隐藏迷你窗口，
+		// 避免出现"迷你窗口没了、主窗口也没出来"什么都看不见的状态。
+		if (::IsIconic(fullWnd))
+			::ShowWindow(fullWnd, SW_RESTORE);   // 之前被最小化过：SW_SHOW 不会还原，必须先 RESTORE
+		windowGUI->ShowWindowGUI();
+		::ShowWindow(hwnd, SW_HIDE);
 	}
 	void HandleHeartButtonClick(HWND hwnd)
 	{
@@ -1170,18 +1202,24 @@ namespace YuMediaPlayer
 
 		if (g_audioPlayer->GetPlaybackState() == PlaybackState::Playing)
 		{
-			// 正在播放，暂停
+			// 正在播放，暂停。
+			// 封面旋转不受暂停影响：旋转只有用户在头像右键菜单里选"停止（复位）"才会停。
 			g_audioPlayer->Pause();
 		}
 		else if (g_audioPlayer->GetPlaybackState() == PlaybackState::Paused)
 		{
 			// 暂停中，继续播放
-			g_audioPlayer->Resume();
+			if (g_audioPlayer->Resume())
+				AutoStartAvatarRotation(hwnd);
 		}
 		else
 		{
 			// 停止状态，播放新文件
-			if (!g_audioPlayer->Play(mp3FilePath))
+			if (g_audioPlayer->Play(mp3FilePath))
+			{
+				AutoStartAvatarRotation(hwnd);   // 音乐开始播放 -> 封面自动开始旋转
+			}
+			else
 			{
 				OutputDebugStringW(L"Failed to play audio file\n");
 				MessageBoxW(hwnd,
@@ -1205,7 +1243,8 @@ namespace YuMediaPlayer
 		}
 		else
 		{
-			g_audioPlayer->Resume();
+			if (g_audioPlayer->Resume())
+				AutoStartAvatarRotation(hwnd);
 		}
 
 		// 重绘按钮
@@ -1217,7 +1256,7 @@ namespace YuMediaPlayer
 		return g_audioPlayer;
 	}
 
-	// ============ 圆形头像右键菜单实现 ============
+	// ============ 圆形头像右键菜单 + 旋转控制 ============
 
 	namespace
 	{
@@ -1225,10 +1264,42 @@ namespace YuMediaPlayer
 		constexpr wchar_t kAvatarRotateText[] = L"旋转";
 		constexpr wchar_t kAvatarStopText[] = L"停止（复位）";
 
+		// 封面旋转速度：每秒转多少度。36 度/秒 = 10 秒一圈，跟 QQ 音乐 / 网易云差不多的悠闲节奏。
+		// 想转快一点就调大这个数。
+		constexpr float kAvatarDegreesPerSecond = 36.0f;
+
+		// 旋转定时器：ID 必须跟 MainWindow::EventProc 里 WM_TIMER 判断的 3001 一致。
+		// 33ms ≈ 30 帧/秒，转这么慢的东西够流畅，比 60 帧省一半重绘开销
+		// （每一帧都要把整个分层窗口重新合成一遍）。
+		constexpr UINT_PTR kAvatarRotationTimerId = 3001;
+		constexpr UINT kAvatarRotationIntervalMs = 33;
+
 		// 头像旋转状态
-		static float s_avatarRotation = 0.0f;  // 当前旋转角度
-		static bool s_isRotating = false;      // 是否正在旋转中
-		static UINT_PTR s_rotationTimer = 0;   // 旋转定时器 ID
+		float s_avatarRotation = 0.0f;         // 当前旋转角度 [0, 360)
+		bool s_isRotating = false;             // 定时器是否在跑（= 正在旋转）
+		bool s_userStoppedRotation = false;    // 用户是否在右键菜单里手动停过（停过就不再自动转）
+		UINT_PTR s_rotationTimer = 0;          // 旋转定时器 ID
+		ULONGLONG s_lastRotationTick = 0;      // 上一帧的时间，用来按真实时间算角度
+
+		// 真正启动定时器。已经在转就直接返回 true。不改 s_userStoppedRotation，
+		// 是否允许启动由调用者（手动 / 自动）自己判断。
+		bool BeginRotationTimer(HWND hwnd)
+		{
+			if (s_isRotating)
+				return true;
+
+			s_rotationTimer = SetTimer(hwnd, kAvatarRotationTimerId, kAvatarRotationIntervalMs, nullptr);
+			if (s_rotationTimer == 0)
+			{
+				OutputDebugStringW(L"[Avatar] SetTimer failed\n");
+				return false;
+			}
+
+			s_isRotating = true;
+			s_lastRotationTick = GetTickCount64();
+			OutputDebugStringW(L"[Avatar] Started rotating\n");
+			return true;
+		}
 	}
 
 	// 显示圆形头像的右键菜单
@@ -1238,9 +1309,12 @@ namespace YuMediaPlayer
 
 		// 添加菜单项
 		// 使用与主菜单一致的 OWNERDRAW，这样头像菜单也保持黑底白字。
-		AppendMenuW(hMenu, MF_OWNERDRAW, ContextMenuCommand::AvatarRotate,
+		// 当前状态对应的那一项打勾：正在转 -> "旋转"打勾；没在转 -> "停止（复位）"打勾。
+		AppendMenuW(hMenu, MF_OWNERDRAW | (s_isRotating ? MF_CHECKED : 0),
+			ContextMenuCommand::AvatarRotate,
 			reinterpret_cast<LPCWSTR>(kAvatarRotateText));
-		AppendMenuW(hMenu, MF_OWNERDRAW, ContextMenuCommand::AvatarStop,
+		AppendMenuW(hMenu, MF_OWNERDRAW | (!s_isRotating ? MF_CHECKED : 0),
+			ContextMenuCommand::AvatarStop,
 			reinterpret_cast<LPCWSTR>(kAvatarStopText));
 
 		// 设置菜单背景
@@ -1251,7 +1325,7 @@ namespace YuMediaPlayer
 
 		SetForegroundWindow(hwnd);
 
-		int cmd = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD, 
+		int cmd = TrackPopupMenu(hMenu, TPM_LEFTALIGN | TPM_RIGHTBUTTON | TPM_RETURNCMD,
 			pt.x, pt.y, 0, hwnd, NULL);
 
 		PostMessage(hwnd, WM_NULL, 0, 0);
@@ -1274,30 +1348,21 @@ namespace YuMediaPlayer
 			break;
 		}
 	}
-	// 启动头像旋转
+	// 用户手动开始旋转（右键菜单 -> 旋转）
 	void StartAvatarRotation(HWND hwnd)
 	{
-		if (s_isRotating)
-		{
-			OutputDebugStringW(L"[Avatar] Already rotating\n");
-			return;
-		}
-
-		s_isRotating = true;
-		s_avatarRotation = 0.0f;
-		OutputDebugStringW(L"[Avatar] Started rotating\n");
-
-		// 创建旋转定时器，每 16ms 更新一次（约 60 FPS）
-		s_rotationTimer = SetTimer(hwnd, 3001, 16, nullptr);
-		if (s_rotationTimer == 0)
-		{
-			s_isRotating = false;
-			OutputDebugStringW(L"[Avatar] SetTimer failed\n");
-			return;
-		}
-		InvalidateRect(hwnd, nullptr, FALSE);
+		s_userStoppedRotation = false;   // 用户主动要求转，解除"手动停止"标记
+		BeginRotationTimer(hwnd);
 	}
-	// 停止头像旋转并复位到 0 度
+	// 开始播放音乐时自动调用
+	void AutoStartAvatarRotation(HWND hwnd)
+	{
+		if (s_userStoppedRotation)
+			return;   // 用户手动停过，尊重他的选择，不自动转
+		BeginRotationTimer(hwnd);
+	}
+	// 用户手动停止旋转并复位到 0 度（右键菜单 -> 停止）。
+	// 只停封面动画，音乐播放完全不受影响。
 	void StopAvatarRotation(HWND hwnd)
 	{
 		if (s_rotationTimer != 0)
@@ -1308,21 +1373,27 @@ namespace YuMediaPlayer
 
 		s_isRotating = false;
 		s_avatarRotation = 0.0f;
+		s_userStoppedRotation = true;    // 记住是用户主动停的，之后播放/切歌都不再自动转
 
 		OutputDebugStringW(L"[Avatar] Stopped and reset to 0 degrees\n");
-		InvalidateRect(hwnd, nullptr, FALSE);
+		// 不需要 InvalidateRect：窗口是分层窗口，重绘靠 MainWindow 调 Composite()
 	}
-	// 处理旋转定时器
-	void HandleAvatarRotationTimer(HWND hwnd, MainWindow* /*pMainWindow*/)
+	// 处理旋转定时器（MainWindow 的 WM_TIMER 3001 里调用，调完会 Composite()）
+	void HandleAvatarRotationTimer(HWND /*hwnd*/, MainWindow* /*pMainWindow*/)
 	{
 		if (!s_isRotating)
 			return;
 
-		s_avatarRotation += 3.0f;
-		if (s_avatarRotation >= 360.0f)
-			s_avatarRotation -= 360.0f;
+		// 按真实经过的时间算角度，而不是"每次定时器 +3 度"：
+		// Windows 的 WM_TIMER 精度只有 15.6ms 左右，而且窗口忙的时候会丢帧，
+		// 按次数加的话转速会忽快忽慢、还跟机器有关。
+		const ULONGLONG now = GetTickCount64();
+		const float elapsedSec = static_cast<float>(now - s_lastRotationTick) / 1000.0f;
+		s_lastRotationTick = now;
 
-		InvalidateRect(hwnd, nullptr, FALSE);
+		s_avatarRotation += kAvatarDegreesPerSecond * elapsedSec;
+		while (s_avatarRotation >= 360.0f)
+			s_avatarRotation -= 360.0f;
 	}
 	// 获取当前头像旋转角度
 	float GetAvatarRotation()

@@ -7,6 +7,7 @@
 #include <windowsx.h>
 #include <algorithm>
 #include <cmath>
+#include <set>
 #include "Core/Theme.h"
 #include "UI/WindowGUI.h"
 #include "UI/miniWindowGUI.h"
@@ -42,6 +43,10 @@ namespace YuMediaPlayer
 	static int  s_panelExtraH = 0;          // 面板展开时窗口比"播放器本体"多出的高度；0 = 没展开
 	static int  s_panelShiftUp = 0;         // 屏幕下方放不下时，窗口为此向上挪了多少像素（关闭时挪回来）
 	static bool s_cardHovered = false;      // 鼠标是否在卡片/头像/列表上：在 = 显示按钮，不在 = 显示歌名歌手
+
+	// 已收藏的歌曲（用音频文件路径当 key）。收藏按钮点一下加入/移除，Composite 里据此画实心/空心心形。
+	// 目前只存在内存里，程序退出就没了；以后要持久化，把这个集合读写到文件即可。
+	static std::set<std::wstring> s_favorites;
 
 	// 鼠标不在卡片上时，按钮是隐藏的，必须把它们的点击区域也挪到屏幕外，
 	// 否则看不见的按钮照样能被点中（WM_NCHITTEST 和 WM_LBUTTONUP 都靠这些矩形判断）。
@@ -168,6 +173,7 @@ namespace YuMediaPlayer
 		m_trayIcon.Create(m_hwnd);
 		m_trayIcon.ShowBalloon(L"YuMediaPlayer starting", L"starting...");
 		m_trayIcon.SetWindowGUI(m_windowGUI.get());
+		m_windowGUI->SetMiniWindow(m_hwnd);   // 关闭主窗口时用它把迷你窗口弄回来
 		int clientW = rc.right - rc.left;
 		int clientH = rc.bottom - rc.top;
 
@@ -586,7 +592,18 @@ namespace YuMediaPlayer
 			}
 			if (IsPointInRectF(pt, buttonsInfo.heart.rect))
 			{
+				// 切换当前这首歌的收藏状态，然后重绘（分层窗口必须手动 Composite，
+				// 否则心形不会跟着变）。
+				if (const Track* favTrack = m_playlist.Current())
+				{
+					auto it = s_favorites.find(favTrack->audioPath);
+					if (it != s_favorites.end())
+						s_favorites.erase(it);
+					else
+						s_favorites.insert(favTrack->audioPath);
+				}
 				HandleHeartButtonClick(hwnd);
+				Composite();
 				return 0;
 			}
 			if (IsPointInRectF(pt, buttonsInfo.previous.rect))
@@ -1260,17 +1277,10 @@ namespace YuMediaPlayer
 					avatarRect.Width, avatarRect.Height);
 				g.SetClip(&clipPath, Gdiplus::CombineModeReplace);
 
-				const float centerX = avatarRect.X + avatarRect.Width * 0.5f;
-				const float centerY = avatarRect.Y + avatarRect.Height * 0.5f;
-				const float rotation = GetAvatarRotation();
-
-				if (std::fabs(rotation) > 0.001f)
-				{
-					g.TranslateTransform(centerX, centerY);
-					g.RotateTransform(rotation);
-					g.TranslateTransform(-centerX, -centerY);
-				}
-
+				// 旋转交给 CircularAvatar 处理：它只转中间的封面图，进度环不跟着转。
+				// （以前是在这里把整个 Graphics 转一下再画，进度环和封面会一起转，
+				//  而且这里如果再转一次就会转两遍，所以这里不能再加旋转变换。）
+				m_avatar.SetRotation(GetAvatarRotation());
 				m_avatar.Draw(g, avatarRect);
 				g.Restore(state);
 			};
@@ -1643,6 +1653,12 @@ namespace YuMediaPlayer
 				Gdiplus::RectF vRect(10.0f, 20.0f, (float)w - 20.0f, (float)bodyH - 30.0f);
 				if (s_cardHovered || s_playlistPanel.IsOpen())
 				{
+					// 当前这首是否已收藏 -> 决定收藏按钮画实心红心还是空心描边心
+					if (const Track* favTrack = m_playlist.Current())
+						buttonsInfo.heart.active = (s_favorites.count(favTrack->audioPath) > 0);
+					else
+						buttonsInfo.heart.active = false;
+
 					DrawPlayButtonGdiplus(g, vRect, false, false);
 					DrawPlaybackButtonsGdiplus(g, vRect, avatarRect, buttonsInfo);
 				}
@@ -1828,7 +1844,13 @@ namespace YuMediaPlayer
 
 		if (AudioPlayer* player = GetAudioPlayer())
 		{
-			if (!player->Play(track.audioPath))
+			if (player->Play(track.audioPath))
+			{
+				// 开始播放 -> 封面自动开始旋转（切歌时已经在转就继续转；
+				// 用户在右键菜单手动停过旋转的话，这里不会再自动转）。
+				AutoStartAvatarRotation(m_hwnd);
+			}
+			else
 			{
 				OutputDebugStringW((L"[MainWindow] 播放失败：" + track.audioPath + L"\n").c_str());
 			}
