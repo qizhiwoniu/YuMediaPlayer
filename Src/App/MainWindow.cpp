@@ -48,6 +48,24 @@ namespace YuMediaPlayer
 	// 目前只存在内存里，程序退出就没了；以后要持久化，把这个集合读写到文件即可。
 	static std::set<std::wstring> s_favorites;
 
+	// 播放进度定时器：定期把 AudioPlayer 的播放进度推给封面外圈的进度环。
+	// （ID 1001=边缘悬停 2001=收起动画 3001=封面旋转，4001 没被占用）
+	static constexpr UINT_PTR kProgressTimerId = 4001;
+	static constexpr UINT     kProgressIntervalMs = 250;
+
+	// 头像右键菜单里选了"进度条：黄色/七彩"之后，把选择应用到 CircularAvatar 的皮肤上。
+	// 其它菜单命令直接忽略。调用者随后要自己 Composite()。
+	static void ApplyAvatarRingChoice(CircularAvatar& avatar, int cmd)
+	{
+		if (cmd != static_cast<int>(ContextMenuCommand::AvatarRingYellow) &&
+			cmd != static_cast<int>(ContextMenuCommand::AvatarRingRainbow))
+			return;
+
+		CircularAvatar::Skin skin = avatar.GetSkin();
+		skin.rainbowProgress = IsRainbowRing();
+		avatar.SetSkin(skin);
+	}
+
 	// 鼠标不在卡片上时，按钮是隐藏的，必须把它们的点击区域也挪到屏幕外，
 	// 否则看不见的按钮照样能被点中（WM_NCHITTEST 和 WM_LBUTTONUP 都靠这些矩形判断）。
 	static void HideControlHitAreas()
@@ -183,6 +201,8 @@ namespace YuMediaPlayer
 		m_edgeHoverTimer = SetTimer(m_hwnd, 1001, 100, nullptr);
 		if (m_edgeHoverTimer == 0)
 			return false;
+
+		SetTimer(m_hwnd, kProgressTimerId, kProgressIntervalMs, nullptr);   // 进度环随播放走动
 		
 		UpdateWindow(m_hwnd);
 		return true; 
@@ -391,6 +411,26 @@ namespace YuMediaPlayer
 				UpdateCollapseAnimation();
 				return 0;
 			}
+			else if (wParam == kProgressTimerId)
+			{
+				// 播放中/暂停中：把 AudioPlayer 的进度同步给进度环。
+				// 已停止就不动它（ApplyTrackToUi 切歌时会把环归零）。
+				AudioPlayer* player = GetAudioPlayer();
+				if (player && player->GetPlaybackState() != PlaybackState::Stopped)
+				{
+					const float p = player->GetPlayProgress();
+					const float cur = m_avatar.GetProgress();
+					const float diff = p > cur ? p - cur : cur - p;
+					if (diff > 0.0005f)   // 变化不到 0.05% 不重绘，省得白白合成整个分层窗口
+					{
+						m_avatar.SetProgress(p);
+						// 封面在旋转时，旋转定时器每帧都会重绘，不用再重复；窗口藏起来时也不用画
+						if (!IsAvatarRotating() && ::IsWindowVisible(hwnd))
+							Composite();
+					}
+				}
+				return 0;
+			}
 			else if (wParam == 3001)
 			{
 				// 更新角度后必须 Composite()，因为窗口使用 UpdateLayeredWindow。
@@ -417,6 +457,7 @@ namespace YuMediaPlayer
 				if (cmd != 0)
 				{
 					HandleAvatarContextMenuCommand(hwnd, cmd);
+					ApplyAvatarRingChoice(m_avatar, cmd);
 					Composite();
 				}
 			}
@@ -440,6 +481,7 @@ namespace YuMediaPlayer
 				if (cmd != 0)
 				{
 					HandleAvatarContextMenuCommand(hwnd, cmd);
+					ApplyAvatarRingChoice(m_avatar, cmd);
 					Composite();
 				}
 				return 0;
@@ -571,6 +613,7 @@ namespace YuMediaPlayer
 			if (IsPointInRectF(pt, buttonsInfo.sound.rect))
 			{
 				HandleSoundButtonClick(hwnd);
+				Composite();   // 分层窗口必须手动重绘，静音图标才会变
 				return 0;
 			}
 			if (IsPointInRectF(pt, buttonsInfo.list.rect))
@@ -842,6 +885,7 @@ namespace YuMediaPlayer
 				KillTimer(hwnd, m_animationTimer);
 				m_animationTimer = 0;
 			}
+			KillTimer(hwnd, kProgressTimerId);
 			PostQuitMessage(0);
 			return 0;
 
@@ -1659,6 +1703,7 @@ namespace YuMediaPlayer
 					else
 						buttonsInfo.heart.active = false;
 
+					buttonsInfo.sound.active = IsSoundMuted();   // 音量按钮：静音时画 ×
 					DrawPlayButtonGdiplus(g, vRect, false, false);
 					DrawPlaybackButtonsGdiplus(g, vRect, avatarRect, buttonsInfo);
 				}

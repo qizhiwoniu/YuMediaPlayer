@@ -23,9 +23,12 @@ public:
         Gdiplus::Color trackColor       = Gdiplus::Color(70, 70, 70);   // 进度环"未播放"部分的颜色（底色）
         Gdiplus::Color progressColor    = Gdiplus::Color(255, 205, 60); // 进度环"已播放"部分的颜色
         Gdiplus::Color placeholderColor = Gdiplus::Color(60, 60, 60);   // 没有封面图且不用黑胶样式时的纯色占位
-        Gdiplus::Color borderColor      = Gdiplus::Color(255, 255, 255, 255); // 封面图外沿细描边颜色（alpha 可调，0=不画）
-        float ringThickness = 3.0f; // 进度环粗细
-        float ringGap       = 2.0f; // 进度环与封面图之间的间隙
+        Gdiplus::Color borderColor      = Gdiplus::Color(0, 255, 255, 255);   // 封面图外沿细描边颜色（alpha 可调，0=不画）。默认不画白边
+        // true = 已播放部分画成七彩（沿圆周一整圈完整彩虹，随进度一点点"长出来"，色带见 CircularAvatar.cpp 的 RainbowColorAt）；
+        // false = 用上面的 progressColor 单色（默认黄色）
+        bool rainbowProgress = false;
+        float ringThickness = 7.0f; // 进度环粗细（想再粗/细一点改这个）
+        float ringGap       = 0.0f; // 进度环与封面图之间的间隙（0 = 紧贴，不留透明缝；想留缝改成 >0）
 
         // ── 无封面时的默认占位样式：黑胶唱片 ───────────────────
         bool useVinylPlaceholder        = true;

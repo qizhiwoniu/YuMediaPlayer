@@ -12,7 +12,7 @@ namespace YuMediaPlayer
 	{
 		Gdiplus::RectF rect;
 		bool hovered = false;
-		bool active = false;   // 选中状态。目前只有收藏按钮用：true = 当前这首已收藏（画实心红心）
+		bool active = false;   // 选中状态。收藏按钮：true = 当前这首已收藏（画实心红心）；音量按钮：true = 已静音
 	};
 	// 播放按钮状态和位置信息
 	struct PlayButtonInfo
@@ -56,6 +56,8 @@ namespace YuMediaPlayer
 		// 圆形头像菜单命令（新增）
 		constexpr UINT AvatarRotate = 3001;       // 旋转头像
 		constexpr UINT AvatarStop = 3002;         // 停止旋转（复位）
+		constexpr UINT AvatarRingYellow = 3003;   // 进度条：黄色
+		constexpr UINT AvatarRingRainbow = 3004;  // 进度条：七彩
 	}
 
 	UINT GetCurrentLoopMode();
@@ -87,6 +89,9 @@ namespace YuMediaPlayer
 	float GetAvatarRotation();
 	// 获取头像是否正在旋转
 	bool IsAvatarRotating();
+	// 进度条皮肤：true = 七彩，false = 黄色。右键菜单选择后由 HandleAvatarContextMenuCommand 更新，
+	// MainWindow 据此设置 CircularAvatar 的皮肤。
+	bool IsRainbowRing();
 
 	
 	// ===== GDI+ 按钮绘制函数 =====
@@ -104,7 +109,8 @@ namespace YuMediaPlayer
 	// 绘制最小化按钮
 	void DrawMiniButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered);
 	// 绘制音量按钮
-	void DrawSoundButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered);
+	// muted=true 时喇叭不画音波，改画一个 ×（静音状态）
+	void DrawSoundButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered, bool muted = false);
 	// 绘制列表按钮
 	void DrawListButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered);
 	// 绘制收藏按钮：favorited=false 画空心描边心形，favorited=true 画实心红心
@@ -115,6 +121,9 @@ namespace YuMediaPlayer
 	void HandleCloseButtonClick(HWND hwnd);
 	void HandleMiniButtonClick(HWND hwnd, WindowGUI* windowGUI);
 	void HandleSoundButtonClick(HWND hwnd);
+	// 静音状态：点音量按钮在静音/恢复之间切换；程序启动/退出时会复位成"未静音"
+	bool IsSoundMuted();
+	void SetSoundMuted(bool muted);
 	void HandleListButtonClick(HWND hwnd);
 	void HandleHeartButtonClick(HWND hwnd);
 	void HandlePreviousButtonClick(HWND hwnd);
