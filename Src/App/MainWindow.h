@@ -2,6 +2,8 @@
 #include <windows.h>
 #include <memory>  
 #include <string>
+#include <vector>
+#include <map>
 #include <gdiplus.h>
 #include "NotifyIcon/TrayIcon.h"
 #include "Core/Theme.h"
@@ -13,6 +15,8 @@ class TrayIcon;
 namespace YuMediaPlayer
 {
 	class WindowGUI;
+	class LocalMusicScanner;
+	struct TrackItem;
 
 	class MainWindow
 	{
@@ -33,6 +37,9 @@ namespace YuMediaPlayer
 		void PlayTrack(int index);
 		void PlayNextTrack();
 		void PlayPreviousTrack();
+		// 扫描本地音乐目录（设置页里的"音乐目录"，没设置就扫 exe 目录下的 song\\local），
+		// 结果同时进入迷你窗口的播放列表和主窗口"本地"页。force=false 时目录没变就不重扫。
+		void StartLocalScan(bool force = false);
 	private:
 		// 把卡片(圆角面板)、头像(进度环+封面)、文字，全部画到 m_dibBits 这张
 		// 带 Alpha 通道的位图上，再用 UpdateLayeredWindow 一次性推给系统显示。
@@ -112,6 +119,20 @@ namespace YuMediaPlayer
 	private:
 		void ApplyTrackToUi(const Track& track);
 		Playlist m_playlist;
+
+		// ── 本地音乐扫描 / 主窗口联动 ────────────────────────────────
+		void InitLocalMusicScan();
+		void ApplyScannedTracks(std::vector<TrackItem> items);   // 扫描完成（UI 线程）
+		void BindMainWindowPlayer();      // 主窗口 上一曲/下一曲/播放/进度条/双击歌曲 -> 迷你窗口逻辑
+		void SyncMainWindowPlayer();      // 迷你窗口 -> 主窗口：歌名/歌手/播放状态/进度
+		void SeekToRatio(float ratio);
+		std::unique_ptr<LocalMusicScanner> m_scanner;
+		std::map<std::wstring, int> m_durations;   // 音频路径 -> 时长（秒），来自扫描标签
+		bool m_scanIsDefaultFolder = false;
+		std::wstring m_syncPath;                   // 上次推给主窗口的状态（没变化就不重绘）
+		int m_syncState = -1;
+		int m_syncCur = -1;
+		int m_syncTotal = -1;
 	private:
 		//std::unique_ptr<TrayIcon> m_trayIcon;
 		std::unique_ptr<YuMediaPlayer::WindowGUI> m_windowGUI;

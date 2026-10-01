@@ -15,6 +15,8 @@
 #include "Core/AudioPlayer.h"
 #include "Core/Playlist.h"
 #include "Core/PlaylistPanel.h"
+#include "Core/SettingPage.h"
+#include "Core/LocalMusicScanner.h"   
 
 #pragma comment(lib, "dwmapi.lib")
 
@@ -41,12 +43,31 @@ namespace YuMediaPlayer
 
 	static PlaylistPanel s_playlistPanel;   // 展开式播放列表面板
 	static int  s_panelExtraH = 0;          // 面板展开时窗口比"播放器本体"多出的高度；0 = 没展开
+	static bool s_panelAbove = false;       // 面板是否在播放器上方（屏幕下方放不下时向上弹出）；true 时播放器本体在窗口下半部分
 	static int  s_panelShiftUp = 0;         // 屏幕下方放不下时，窗口为此向上挪了多少像素（关闭时挪回来）
 	static bool s_cardHovered = false;      // 鼠标是否在卡片/头像/列表上：在 = 显示按钮，不在 = 显示歌名歌手
 
 	// 已收藏的歌曲（用音频文件路径当 key）。收藏按钮点一下加入/移除，Composite 里据此画实心/空心心形。
 	// 目前只存在内存里，程序退出就没了；以后要持久化，把这个集合读写到文件即可。
 	static std::set<std::wstring> s_favorites;
+
+	// 播放进度定时器：定期把 AudioPlayer 的播放进度推给封面外圈的进度环。
+	// （ID 1001=边缘悬停 2001=收起动画 3001=封面旋转，4001 没被占用）
+	static constexpr UINT_PTR kProgressTimerId = 4001;
+	static constexpr UINT     kProgressIntervalMs = 250;
+
+	// 头像右键菜单里选了"进度条：黄色/七彩"之后，把选择应用到 CircularAvatar 的皮肤上。
+	// 其它菜单命令直接忽略。调用者随后要自己 Composite()。
+	static void ApplyAvatarRingChoice(CircularAvatar& avatar, int cmd)
+	{
+		if (cmd != static_cast<int>(ContextMenuCommand::AvatarRingYellow) &&
+			cmd != static_cast<int>(ContextMenuCommand::AvatarRingRainbow))
+			return;
+
+		CircularAvatar::Skin skin = avatar.GetSkin();
+		skin.rainbowProgress = IsRainbowRing();
+		avatar.SetSkin(skin);
+	}
 
 	// 鼠标不在卡片上时，按钮是隐藏的，必须把它们的点击区域也挪到屏幕外，
 	// 否则看不见的按钮照样能被点中（WM_NCHITTEST 和 WM_LBUTTONUP 都靠这些矩形判断）。
@@ -77,7 +98,27 @@ namespace YuMediaPlayer
 	}
 
 	// 把窗口高度改成"播放器本体高度 + newExtra"（newExtra = 0 就是恢复成没有列表的样子）。
-	// 窗口顶边不动、向下长；屏幕下方放不下时整个窗口往上挪，关闭时再挪回来。
+	// 默认窗口顶边不动、向下长；屏幕下方放不下时改成向上弹出：窗口顶边往上长，
+	// 播放器本体留在原地不动，列表面板画在它上面。上面也放不下时，才退回
+	// "向下长并把整个窗口往上挪"。关闭时都恢复成原来的位置。
+	// ShouldOpenPlaylistAbove 先判断该往哪个方向弹（extraDown / extraUp 是两种方向下
+	// 面板需要的额外高度），调用者据此 SetOpen 之后再调 ResizeWindowForPlaylist。
+	static bool ShouldOpenPlaylistAbove(HWND hwnd, int extraDown, int extraUp)
+	{
+		RECT wr;
+		GetWindowRect(hwnd, &wr);
+		HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+		MONITORINFO mi = { sizeof(mi) };
+		if (!GetMonitorInfo(hMon, &mi))
+			return false;
+
+		// 向下放不下，并且向上放得下 -> 向上弹出；否则向下（向下放不下时
+		// ResizeWindowForPlaylist 还会把整个窗口往上挪）。
+		const bool fitsBelow = wr.bottom + extraDown <= mi.rcWork.bottom;
+		const bool fitsAbove = wr.top - extraUp >= mi.rcWork.top;
+		return !fitsBelow && fitsAbove;
+	}
+
 	static void ResizeWindowForPlaylist(HWND hwnd, int newExtra)
 	{
 		RECT wr;
@@ -88,7 +129,13 @@ namespace YuMediaPlayer
 		const int newH = baseH + newExtra;
 		int top = wr.top;
 
-		if (newExtra > 0)
+		if (newExtra > 0 && s_panelAbove)
+		{
+			// 向上弹出：本体位置不动 -> 窗口顶边上移 newExtra。
+			top = wr.top - newExtra;
+			s_panelShiftUp = 0;
+		}
+		else if (newExtra > 0)
 		{
 			HMONITOR hMon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
 			MONITORINFO mi = { sizeof(mi) };
@@ -105,6 +152,12 @@ namespace YuMediaPlayer
 					s_panelShiftUp = shift;
 				}
 			}
+		}
+		else if (s_panelAbove)
+		{
+			// 关闭向上弹出的面板：顶边落回去，本体仍在原位。
+			top = wr.top + s_panelExtraH;
+			s_panelAbove = false;
 		}
 		else
 		{
@@ -126,6 +179,7 @@ namespace YuMediaPlayer
 	{}
 	MainWindow::~MainWindow()
 	{
+		m_scanner.reset();     // 先停掉后台扫描线程
 		CleanupAudioPlayer();  // <<<新增
 	}
 	bool MainWindow::Initialize(const wchar_t* title, int width, int height)
@@ -174,6 +228,11 @@ namespace YuMediaPlayer
 		m_trayIcon.ShowBalloon(L"YuMediaPlayer starting", L"starting...");
 		m_trayIcon.SetWindowGUI(m_windowGUI.get());
 		m_windowGUI->SetMiniWindow(m_hwnd);   // 关闭主窗口时用它把迷你窗口弄回来
+		m_windowGUI->SetUpdateCallback([this]() {
+			m_trayIcon.CheckUpdate();
+			});
+		BindMainWindowPlayer();   // 主窗口播放栏 <-> 迷你窗口
+		InitLocalMusicScan();     // 启动自动扫描本地音乐
 		int clientW = rc.right - rc.left;
 		int clientH = rc.bottom - rc.top;
 
@@ -183,6 +242,8 @@ namespace YuMediaPlayer
 		m_edgeHoverTimer = SetTimer(m_hwnd, 1001, 100, nullptr);
 		if (m_edgeHoverTimer == 0)
 			return false;
+
+		SetTimer(m_hwnd, kProgressTimerId, kProgressIntervalMs, nullptr);   // 进度环随播放走动
 		
 		UpdateWindow(m_hwnd);
 		return true; 
@@ -305,11 +366,17 @@ namespace YuMediaPlayer
 			const int y = cp.y - wr.top;
 			const int w = wr.right - wr.left;
 			const int bodyH = (wr.bottom - wr.top) - s_panelExtraH;
+			const int bodyTop = s_panelAbove ? s_panelExtraH : 0;   // 向上弹出时本体在窗口下半部分
+			const int by = y - bodyTop;                             // 相对本体左上角的 y
 
-			bool inside = (x >= 10 && x < w - 10 && y >= 20 && y < bodyH - 10)   // 卡片
-				|| (x >= 18 && x < 102 && y >= 0 && y < 84);                     // 头像
-			if (s_panelExtraH > 0 && x >= 10 && x < w - 10 && y >= bodyH - 6 && y < bodyH + s_panelExtraH)
-				inside = true;                                                    // 列表面板
+			bool inside = (x >= 10 && x < w - 10 && by >= 20 && by < bodyH - 10)   // 卡片
+				|| (x >= 18 && x < 102 && by >= 0 && by < 84);                     // 头像
+			if (s_panelExtraH > 0 && x >= 10 && x < w - 10)                        // 列表面板
+			{
+				if (s_panelAbove ? (y >= 0 && y < bodyTop)
+				                 : (y >= bodyH - 6 && y < bodyH + s_panelExtraH))
+					inside = true;
+			}
 			if (m_isCollapsed || m_isAnimating)
 				inside = false;
 
@@ -391,6 +458,27 @@ namespace YuMediaPlayer
 				UpdateCollapseAnimation();
 				return 0;
 			}
+			else if (wParam == kProgressTimerId)
+			{
+				// 播放中/暂停中：把 AudioPlayer 的进度同步给进度环。
+				// 已停止就不动它（ApplyTrackToUi 切歌时会把环归零）。
+				AudioPlayer* player = GetAudioPlayer();
+				if (player && player->GetPlaybackState() != PlaybackState::Stopped)
+				{
+					const float p = player->GetPlayProgress();
+					const float cur = m_avatar.GetProgress();
+					const float diff = p > cur ? p - cur : cur - p;
+					if (diff > 0.0005f)   // 变化不到 0.05% 不重绘，省得白白合成整个分层窗口
+					{
+						m_avatar.SetProgress(p);
+						// 封面在旋转时，旋转定时器每帧都会重绘，不用再重复；窗口藏起来时也不用画
+						if (!IsAvatarRotating() && ::IsWindowVisible(hwnd))
+							Composite();
+					}
+				}
+				SyncMainWindowPlayer();   // 主窗口的进度条/时间/播放状态跟着走
+				return 0;
+			}
 			else if (wParam == 3001)
 			{
 				// 更新角度后必须 Composite()，因为窗口使用 UpdateLayeredWindow。
@@ -417,6 +505,7 @@ namespace YuMediaPlayer
 				if (cmd != 0)
 				{
 					HandleAvatarContextMenuCommand(hwnd, cmd);
+					ApplyAvatarRingChoice(m_avatar, cmd);
 					Composite();
 				}
 			}
@@ -440,6 +529,7 @@ namespace YuMediaPlayer
 				if (cmd != 0)
 				{
 					HandleAvatarContextMenuCommand(hwnd, cmd);
+					ApplyAvatarRingChoice(m_avatar, cmd);
 					Composite();
 				}
 				return 0;
@@ -571,11 +661,12 @@ namespace YuMediaPlayer
 			if (IsPointInRectF(pt, buttonsInfo.sound.rect))
 			{
 				HandleSoundButtonClick(hwnd);
+				Composite();   // 分层窗口必须手动重绘，静音图标才会变
 				return 0;
 			}
 			if (IsPointInRectF(pt, buttonsInfo.list.rect))
 			{
-				// 展开 / 收起播放列表：窗口向下变高，面板画在播放器卡片下面。
+				// 展开 / 收起播放列表：默认窗口向下变高、面板画在卡片下面；靠近屏幕底部时向上弹出。
 				if (s_playlistPanel.IsOpen())
 				{
 					s_playlistPanel.SetOpen(false);
@@ -583,8 +674,14 @@ namespace YuMediaPlayer
 				}
 				else
 				{
-					s_playlistPanel.SetOpen(true);
-					ResizeWindowForPlaylist(hwnd, s_playlistPanel.ExtraHeight(m_playlist.Count()));
+					// 屏幕下方放不下、上方放得下 -> 向上弹出；否则向下弹出。
+					s_playlistPanel.SetOpen(true, true);
+					const int extraUp = s_playlistPanel.ExtraHeight(m_playlist.Count());
+					s_playlistPanel.SetOpen(true, false);
+					const int extraDown = s_playlistPanel.ExtraHeight(m_playlist.Count());
+					s_panelAbove = ShouldOpenPlaylistAbove(hwnd, extraDown, extraUp);
+					s_playlistPanel.SetOpen(true, s_panelAbove);
+					ResizeWindowForPlaylist(hwnd, s_panelAbove ? extraUp : extraDown);
 					s_playlistPanel.EnsureVisible(m_playlist);
 				}
 				Composite();
@@ -717,7 +814,8 @@ namespace YuMediaPlayer
 
 			bool left = pt.x < wr.left + border;
 			bool right = pt.x >= wr.right - border;
-			bool top = pt.y < wr.top + border;
+			// 向上弹出时窗口顶部是列表面板，不当作可拖拽的上边缘。
+		bool top = !s_panelAbove && pt.y < wr.top + border;
 			// 列表展开时窗口下半部分是列表面板，不当作可拖拽的下边缘。
 			bool bottom = (s_panelExtraH == 0) && pt.y >= wr.bottom - border;
 		/*	bool middle = !left && !right && !top && !bottom;
@@ -765,7 +863,7 @@ namespace YuMediaPlayer
 			// 标题栏（用于拖动） - 卡片顶部区域
 			// 列表展开时，"播放器本体"的底边是 wr.bottom - s_panelExtraH，拖动区要按它算，
 			// 面板区域走下面的 HTCLIENT，这样才能收到点击和悬停。
-			const LONG bodyBottom = wr.bottom - s_panelExtraH;
+			const LONG bodyBottom = s_panelAbove ? wr.bottom : wr.bottom - s_panelExtraH;   // 向上弹出时本体在窗口底部
 			if (pt.y >= bodyBottom - 70 && pt.y < bodyBottom)
 			{
 				return HTCAPTION;
@@ -842,6 +940,7 @@ namespace YuMediaPlayer
 				KillTimer(hwnd, m_animationTimer);
 				m_animationTimer = 0;
 			}
+			KillTimer(hwnd, kProgressTimerId);
 			PostQuitMessage(0);
 			return 0;
 
@@ -1362,8 +1461,8 @@ namespace YuMediaPlayer
 						stringFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
 						stringFormat.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
 
-						Gdiplus::Font titleFont(L"Microsoft YaHei UI", 11.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-						Gdiplus::Font artistFont(L"Microsoft YaHei UI", 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+						Gdiplus::Font titleFont(L"Microsoft YaHei UI", 15.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+						Gdiplus::Font artistFont(L"Microsoft YaHei UI", 13.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
 						
 						// 文字逐渐消失（透明度递增）
 						int titleAlpha = (int)(255.0f * (1.0f - textAlphaProgress));
@@ -1437,8 +1536,8 @@ namespace YuMediaPlayer
 						stringFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
 						stringFormat.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
 
-						Gdiplus::Font titleFont(L"Microsoft YaHei UI", 11.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-						Gdiplus::Font artistFont(L"Microsoft YaHei UI", 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+						Gdiplus::Font titleFont(L"Microsoft YaHei UI", 15.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+						Gdiplus::Font artistFont(L"Microsoft YaHei UI", 13.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
 						
 						// 文字逐渐显示（透明度递增）
 						int titleAlpha = (int)(255.0f * textAlphaProgress);
@@ -1513,8 +1612,8 @@ namespace YuMediaPlayer
 						stringFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
 						stringFormat.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
 
-						Gdiplus::Font titleFont(L"Microsoft YaHei UI", 11.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-						Gdiplus::Font artistFont(L"Microsoft YaHei UI", 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+						Gdiplus::Font titleFont(L"Microsoft YaHei UI", 15.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+						Gdiplus::Font artistFont(L"Microsoft YaHei UI", 13.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
 						
 						// 文字逐渐消失（透明度递增）
 						int titleAlpha = (int)(255.0f * (1.0f - textAlphaProgress));
@@ -1588,8 +1687,8 @@ namespace YuMediaPlayer
 						stringFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
 						stringFormat.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
 
-						Gdiplus::Font titleFont(L"Microsoft YaHei UI", 11.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-						Gdiplus::Font artistFont(L"Microsoft YaHei UI", 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+						Gdiplus::Font titleFont(L"Microsoft YaHei UI", 15.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+						Gdiplus::Font artistFont(L"Microsoft YaHei UI", 13.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
 						
 						// 文字逐渐显示（透明度递增）
 						int titleAlpha = (int)(255.0f * textAlphaProgress);
@@ -1630,7 +1729,11 @@ namespace YuMediaPlayer
 				// 播放列表展开时窗口比播放器本体高 s_panelExtraH，卡片和按钮布局只按本体高度算，
 				// 多出来的那一截留给列表面板。
 				const int bodyH = h - s_panelExtraH;
-				Gdiplus::RectF cardRect(10.0f, 20.0f, (float)w - 20.0f, (float)bodyH - 30.0f);
+				// 向上弹出时面板在窗口顶部，播放器本体整体下移 s_panelExtraH。
+				// 本体坐标（卡片/头像/按钮）都加这个偏移，buttonsInfo 里存的按钮矩形
+				// 也就自然是窗口客户区坐标，命中测试不用改。
+				const float bodyTop = s_panelAbove ? (float)s_panelExtraH : 0.0f;
+				Gdiplus::RectF cardRect(10.0f, bodyTop + 20.0f, (float)w - 20.0f, (float)bodyH - 30.0f);
 				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
 
 				Gdiplus::GraphicsPath path;
@@ -1645,12 +1748,12 @@ namespace YuMediaPlayer
 
 				// 绘制圆形头像和进度环。
 				// X 从 8 改为 18：向右移动 10px，让卡片左边露出一点在头像左侧。
-				Gdiplus::RectF avatarRect(18.0f, 0.0f, 84.0f, 84.0f);
+				Gdiplus::RectF avatarRect(18.0f, bodyTop, 84.0f, 84.0f);
 				drawAvatar(avatarRect);
 
 				// 跟 QQ 音乐一样：鼠标不在卡片上时显示歌名 + 歌手，
 				// 鼠标放上来（或者列表展开着）时换成播放控制按钮。
-				Gdiplus::RectF vRect(10.0f, 20.0f, (float)w - 20.0f, (float)bodyH - 30.0f);
+				Gdiplus::RectF vRect(10.0f, bodyTop + 20.0f, (float)w - 20.0f, (float)bodyH - 30.0f);
 				if (s_cardHovered || s_playlistPanel.IsOpen())
 				{
 					// 当前这首是否已收藏 -> 决定收藏按钮画实心红心还是空心描边心
@@ -1659,6 +1762,7 @@ namespace YuMediaPlayer
 					else
 						buttonsInfo.heart.active = false;
 
+					buttonsInfo.sound.active = IsSoundMuted();   // 音量按钮：静音时画 ×
 					DrawPlayButtonGdiplus(g, vRect, false, false);
 					DrawPlaybackButtonsGdiplus(g, vRect, avatarRect, buttonsInfo);
 				}
@@ -1730,8 +1834,8 @@ namespace YuMediaPlayer
 		format.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
 		format.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
 
-		Gdiplus::Font titleFont(L"Microsoft YaHei UI", 11.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-		Gdiplus::Font artistFont(L"Microsoft YaHei UI", 9.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+		Gdiplus::Font titleFont(L"Microsoft YaHei UI", 15.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+		Gdiplus::Font artistFont(L"Microsoft YaHei UI", 13.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
 		Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 255, 255));
 		Gdiplus::SolidBrush artistBrush(Gdiplus::Color(200, 200, 200));
 
@@ -1857,6 +1961,7 @@ namespace YuMediaPlayer
 		}
 
 		Composite();
+		SyncMainWindowPlayer();   // 主窗口同步显示新歌
 	}
 
 	void MainWindow::PlayNextTrack()
@@ -1877,6 +1982,251 @@ namespace YuMediaPlayer
 
 		const bool shuffle = (GetCurrentLoopMode() == ContextMenuCommand::LoopModeShuffle);
 		PlayTrack(m_playlist.MovePrevious(shuffle));
+	}
+
+	// ===== 本地音乐自动扫描 / 主窗口联动 =====
+
+	static std::wstring ExeDir()
+	{
+		wchar_t buf[MAX_PATH * 2] = { 0 };
+		const DWORD n = GetModuleFileNameW(nullptr, buf, (DWORD)(sizeof(buf) / sizeof(buf[0])));
+		std::wstring p(buf, n);
+		const size_t s = p.find_last_of(L"\\/");
+		return s == std::wstring::npos ? std::wstring(L".") : p.substr(0, s);
+	}
+
+	// 和音频文件同名的封面图（周杰伦-七里香.mp3 -> 周杰伦-七里香.jpg/png/...），没有返回空
+	static std::wstring FindSiblingCover(const std::wstring& audioPath)
+	{
+		const size_t dot = audioPath.find_last_of(L'.');
+		const size_t slash = audioPath.find_last_of(L"\\/");
+		if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash))
+			return std::wstring();
+
+		static const wchar_t* kExts[] = { L".jpg", L".jpeg", L".png", L".bmp" };
+		const std::wstring base = audioPath.substr(0, dot);
+		for (const wchar_t* ext : kExts)
+		{
+			const std::wstring c = base + ext;
+			const DWORD a = GetFileAttributesW(c.c_str());
+			if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY))
+				return c;
+		}
+		return std::wstring();
+	}
+
+	void MainWindow::StartLocalScan(bool force)
+	{
+		if (!m_scanner || !m_windowGUI)
+			return;
+
+		const std::wstring configured = m_windowGUI->GetSettingPage().GetSettings().musicFolder;
+		m_scanIsDefaultFolder = configured.empty();
+		const std::wstring folder = configured.empty() ? (ExeDir() + L"\\song\\local") : configured;
+		m_scanner->Start(folder, force);    // 后台线程扫描，不卡界面
+	}
+
+	void MainWindow::InitLocalMusicScan()
+	{
+		if (!m_windowGUI)
+			return;
+
+		if (!m_scanner)
+			m_scanner = std::make_unique<LocalMusicScanner>();   // 内部有消息窗口，必须在 UI 线程创建
+
+		m_scanner->SetResultCallback([this](std::vector<TrackItem> items)
+			{
+				ApplyScannedTracks(std::move(items));
+			});
+
+		// 设置页里选了新目录 / 恢复默认 -> 重新扫描
+		m_windowGUI->GetSettingPage().SetMusicFolderChangedCallback([this](const std::wstring&)
+			{
+				StartLocalScan(true);
+			});
+
+		StartLocalScan(false);   // 启动时扫描一次
+	}
+
+	void MainWindow::ApplyScannedTracks(std::vector<TrackItem> items)
+	{
+		// 默认目录里什么都没扫到：保留 Initialize 里 LoadDefault 载入的列表，不清空
+		if (items.empty() && m_scanIsDefaultFolder)
+			return;
+
+		AudioPlayer* player = GetAudioPlayer();
+		const bool active = player && player->GetPlaybackState() != PlaybackState::Stopped;
+
+		// 正在播放/暂停的那首，换列表后继续指向它（不会被打断）
+		std::wstring keepPath;
+		if (active)
+			if (const Track* cur = m_playlist.Current())
+				keepPath = cur->audioPath;
+
+		std::vector<Track> tracks;
+		tracks.reserve(items.size());
+		m_durations.clear();
+		for (TrackItem& it : items)
+		{
+			Track t;
+			t.audioPath = it.path;
+			t.coverPath = FindSiblingCover(it.path);
+			t.title = it.title;
+			t.artist = it.artist;
+			tracks.push_back(std::move(t));
+
+			if (it.durationSeconds > 0)
+				m_durations[it.path] = it.durationSeconds;
+			it.favorite = (s_favorites.count(it.path) > 0);
+		}
+
+		// 列表面板展开时它的高度跟歌曲数有关，先收起来再换数据
+		if (s_playlistPanel.IsOpen())
+		{
+			s_playlistPanel.SetOpen(false);
+			ResizeWindowForPlaylist(m_hwnd, 0);
+		}
+
+		const bool keptCurrent = m_playlist.ReplaceAll(std::move(tracks), keepPath);
+
+		// 正在播的那首不在新列表里（比如换了音乐目录）：停掉，免得界面显示的和实际播放的不是同一首
+		bool stillActive = active;
+		if (active && !keptCurrent)
+		{
+			player->Stop();
+			stillActive = false;
+		}
+
+		// 主窗口"本地"页（行号 == 播放列表下标，双击时直接 PlayTrack(row)）
+		if (m_windowGUI)
+			m_windowGUI->SetLocalTracks(std::move(items));
+
+		if (const Track* cur = m_playlist.Current())
+		{
+			if (!stillActive)
+				ApplyTrackToUi(*cur);    // 没在播放：迷你窗口显示第一首的封面/歌名
+		}
+		else
+		{
+			m_avatar.ClearImage();
+			m_avatar.SetProgress(0.0f);
+			m_trackTitle.clear();
+			m_trackArtist.clear();
+		}
+
+		m_syncPath = L"\x1";   // 让下一次同步一定会把歌名/时长重新推给主窗口
+		m_syncCur = m_syncTotal = m_syncState = -1;
+		Composite();
+		SyncMainWindowPlayer();
+	}
+
+	void MainWindow::BindMainWindowPlayer()
+	{
+		if (!m_windowGUI)
+			return;
+
+		// 上一曲 / 下一曲：和迷你窗口的按钮走同一个函数，两边自然同步
+		m_windowGUI->SetPrevCallback([this]() { PlayPreviousTrack(); });
+		m_windowGUI->SetNextCallback([this]() { PlayNextTrack(); });
+
+		// 播放/暂停/继续：和迷你窗口播放按钮同一个函数
+		m_windowGUI->SetPlayPauseCallback([this]()
+			{
+				const Track* cur = m_playlist.Current();
+				if (!cur)
+					return;
+				HandlePlayButtonClick(m_hwnd, cur->audioPath);
+				Composite();               // 迷你窗口的播放/暂停图标
+				SyncMainWindowPlayer();    // 主窗口的图标
+			});
+
+		// 拖动/点击进度条
+		m_windowGUI->SetSeekCallback([this](float ratio) { SeekToRatio(ratio); });
+
+		// 双击"本地"页的歌曲 -> 播放。（乐馆/喜欢页暂时没有对应的播放列表，先忽略）
+		m_windowGUI->SetTrackActivateCallback([this](int page, int row)
+			{
+				if (page == 1 && row >= 0 && row < m_playlist.Count())
+					PlayTrack(row);
+			});
+	}
+
+	void MainWindow::SeekToRatio(float ratio)
+	{
+		AudioPlayer* player = GetAudioPlayer();
+		m_syncCur = -1;   // 让下一次同步重新推进度，拖动预览不会卡在原地
+		if (!player || player->GetPlaybackState() == PlaybackState::Stopped)
+			return;
+
+		if (ratio < 0.0f) ratio = 0.0f;
+		if (ratio > 1.0f) ratio = 1.0f;
+
+		const long long durMs = player->GetDuration();
+		if (durMs > 0)
+			player->SetPosition(static_cast<long long>(ratio * static_cast<float>(durMs)));
+
+		// 进度环也立刻跟着动一下
+		m_avatar.SetProgress(ratio);
+		Composite();
+		SyncMainWindowPlayer();
+	}
+
+	void MainWindow::SyncMainWindowPlayer()
+	{
+		if (!m_windowGUI)
+			return;
+		const HWND gw = m_windowGUI->GetHWND();
+		if (!gw || !::IsWindowVisible(gw))
+		{
+			// 主窗口没显示就不推；清掉"上次推送"的记录，等它显示出来时下一个 250ms 的定时器会整套补上
+			m_syncPath = L"\x1";
+			m_syncState = m_syncCur = m_syncTotal = -1;
+			return;
+		}
+
+		AudioPlayer* player = GetAudioPlayer();
+		const PlaybackState st = player ? player->GetPlaybackState() : PlaybackState::Stopped;
+		const Track* cur = m_playlist.Current();
+
+		// 播放/暂停图标
+		const int stateInt = static_cast<int>(st);
+		if (stateInt != m_syncState)
+		{
+			m_syncState = stateInt;
+			m_windowGUI->SetPlaying(st == PlaybackState::Playing);
+		}
+
+		// 歌名 / 歌手（换歌时才推）
+		const std::wstring path = cur ? cur->audioPath : std::wstring();
+		// 总时长：播放/暂停中以播放器实际读到的为准，没在播放时用扫描标签里的时长
+		int total = 0;
+		if (player && st != PlaybackState::Stopped && player->GetDuration() > 0)
+		{
+			total = static_cast<int>((player->GetDuration() + 500) / 1000);
+		}
+		else if (cur)
+		{
+			auto it = m_durations.find(path);
+			if (it != m_durations.end())
+				total = it->second;
+		}
+		if (path != m_syncPath)
+		{
+			m_syncPath = path;
+			m_syncCur = m_syncTotal = -1;
+			m_windowGUI->SetNowPlaying(cur ? cur->title.c_str() : L"", cur ? cur->artist.c_str() : L"");
+		}
+
+		// 进度条 + 两端的时间文字：当前秒 = 播放比例 * 时长
+		int curSec = 0;
+		if (player && st != PlaybackState::Stopped && total > 0)
+			curSec = static_cast<int>(player->GetCurrentPosition() / 1000);
+		if (curSec != m_syncCur || total != m_syncTotal)
+		{
+			m_syncCur = curSec;
+			m_syncTotal = total;
+			m_windowGUI->SetProgress(curSec, total);
+		}
 	}
 
 

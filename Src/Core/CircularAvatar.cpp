@@ -78,6 +78,75 @@ namespace
         delete src;
         return dst;
     }
+
+    // 七彩进度环的色带：一整圈完整的彩虹，首尾相接（转满一圈刚好回到起点的红色，没有接缝）。
+    // 从正上方 0° 顺时针依次是：红 → 洋红 → 紫 → 蓝 → 青 → 绿 → 黄 → 橙 → 回到红
+    // （就是色相随角度递减：hue = 360° - angle）。
+    // 想让颜色更淡/更艳，改下面的饱和度 kSat 和亮度 kVal。
+    Color RainbowColorAt(float angleDeg)
+    {
+        const float kSat = 0.88f;
+        const float kVal = 0.85f;
+
+        float h = std::fmod(360.0f - angleDeg, 360.0f);
+        if (h < 0.0f) h += 360.0f;
+
+        const float c = kVal * kSat;
+        const float x = c * (1.0f - std::fabs(std::fmod(h / 60.0f, 2.0f) - 1.0f));
+        const float m = kVal - c;
+        float r = 0.0f, g = 0.0f, b = 0.0f;
+        switch (static_cast<int>(h / 60.0f))
+        {
+        case 0:  r = c; g = x; b = 0; break;
+        case 1:  r = x; g = c; b = 0; break;
+        case 2:  r = 0; g = c; b = x; break;
+        case 3:  r = 0; g = x; b = c; break;
+        case 4:  r = x; g = 0; b = c; break;
+        default: r = c; g = 0; b = x; break;
+        }
+        return Color(255,
+            static_cast<BYTE>((r + m) * 255.0f + 0.5f),
+            static_cast<BYTE>((g + m) * 255.0f + 0.5f),
+            static_cast<BYTE>((b + m) * 255.0f + 0.5f));
+    }
+
+    // 画七彩进度弧：从正上方（-90°）顺时针画 sweep 度。
+    // 颜色按"这一段在圆周上的位置"决定，所以进度越走越长，颜色就一点点"长出来"，
+    // 而不是整条弧一起变色。
+    // 做法：切成每段 3° 的小弧，各画各的颜色（相邻段多叠 1° 避免出现缝），
+    // 两端再补一个圆头，跟单色进度环的圆角效果保持一致。
+    void DrawRainbowArc(Graphics& g, const RectF& arcRect, float thickness, float sweep)
+    {
+        const float kStep = 3.0f;
+        const float kOverlap = 1.0f;
+        const float kPi = 3.14159265f;
+
+        Pen pen(Color(255, 255, 255, 255), thickness);   // 默认平头，圆头单独补
+        for (float a = 0.0f; a < sweep; a += kStep)
+        {
+            const float end = (std::min)(a + kStep + kOverlap, sweep);
+            const float segSweep = end - a;
+            if (segSweep <= 0.0f)
+                break;
+            pen.SetColor(RainbowColorAt(a + segSweep / 2.0f));
+            g.DrawArc(&pen, arcRect, -90.0f + a, segSweep);
+        }
+
+        const float radius = arcRect.Width / 2.0f;
+        const float cx = arcRect.X + radius;
+        const float cy = arcRect.Y + arcRect.Height / 2.0f;
+        auto capAt = [&](float angle)
+        {
+            const float rad = (-90.0f + angle) * kPi / 180.0f;
+            SolidBrush brush(RainbowColorAt(angle));
+            g.FillEllipse(&brush,
+                cx + radius * std::cos(rad) - thickness / 2.0f,
+                cy + radius * std::sin(rad) - thickness / 2.0f,
+                thickness, thickness);
+        };
+        capAt(0.0f);
+        capAt(sweep);
+    }
 }
 
 ULONG_PTR CircularAvatar::s_gdiplusToken = 0;
@@ -202,6 +271,14 @@ void CircularAvatar::Draw(Gdiplus::Graphics& graphics, const Gdiplus::RectF& rec
         float inset = ringThickness / 2.0f;
         RectF arcRect(inset, inset, w - ringThickness, h - ringThickness);
 
+        // 先把整个圆（到进度环中线为止）垫一层底色：
+        // 环内缘和封面外缘各自抗锯齿的半透明边缘叠在一起，凑不满 100% 不透明，
+        // 头像探出卡片顶部的那一段背后是透明的，就会漏出一道细缝。有这层垫底就不会漏了。
+        {
+            SolidBrush underlay(m_skin.trackColor);
+            graphics.FillEllipse(&underlay, inset, inset, w - ringThickness, h - ringThickness);
+        }
+
         Pen trackPen(m_skin.trackColor, ringThickness);
         trackPen.SetStartCap(LineCapRound);
         trackPen.SetEndCap(LineCapRound);
@@ -209,11 +286,18 @@ void CircularAvatar::Draw(Gdiplus::Graphics& graphics, const Gdiplus::RectF& rec
 
         if (m_progress > 0.0f)
         {
-            Pen progressPen(m_skin.progressColor, ringThickness);
-            progressPen.SetStartCap(LineCapRound);
-            progressPen.SetEndCap(LineCapRound);
             float sweep = 360.0f * m_progress;
-            graphics.DrawArc(&progressPen, arcRect, -90.0f, sweep);
+            if (m_skin.rainbowProgress)
+            {
+                DrawRainbowArc(graphics, arcRect, ringThickness, sweep);
+            }
+            else
+            {
+                Pen progressPen(m_skin.progressColor, ringThickness);
+                progressPen.SetStartCap(LineCapRound);
+                progressPen.SetEndCap(LineCapRound);
+                graphics.DrawArc(&progressPen, arcRect, -90.0f, sweep);
+            }
         }
     }
 

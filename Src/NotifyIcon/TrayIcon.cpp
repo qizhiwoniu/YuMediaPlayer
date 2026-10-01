@@ -4,7 +4,7 @@
 #include <wininet.h>
 #include <string>
 #include "UI/WindowGUI.h"
-
+#include "SettingPage.h"
 // ============================================================
 // Windows 10/11 原生菜单暗黑模式
 // uxtheme.dll:
@@ -486,7 +486,7 @@ static void EnableDarkPopupMenu()
             break;
 
         case ID_TRAY_SETTINGS:
-            // TODO: 打开设置窗口
+			CheckSettings();
             break;
 
         case ID_TRAY_CHECK:
@@ -698,3 +698,18 @@ static void EnableDarkPopupMenu()
             }
         }
     }
+    void TrayIcon::CheckSettings() {
+        static YuMediaPlayer::SettingPage settingPage;
+
+        if (!settingPage.Show(m_parentHwnd))
+        {
+            MessageBoxW(
+                m_parentHwnd,
+                L"设置窗口创建失败。",
+                L"YuMediaPlayer",
+                MB_OK | MB_ICONERROR
+            );
+        }
+	}
+
+    

@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 #include <windows.h>
 #include <gdiplus.h>
 #include "Core/Playlist.h"
@@ -16,12 +16,16 @@ namespace YuMediaPlayer
 	{
 	public:
 		bool IsOpen() const { return m_open; }
-		void SetOpen(bool open);
+		// above = true：面板画在播放器本体上方（屏幕下方放不下时用）；false：画在下方。
+		// 只在 open=true 时有意义，要在调用 ExtraHeight 之前设置。
+		void SetOpen(bool open, bool above = false);
+		bool IsAbove() const { return m_above; }
 
 		// 展开时，窗口需要比"播放器本体"多出多少像素来放列表。
 		int ExtraHeight(int trackCount) const;
 
-		// 画面板。winW = 窗口宽度；baseH = 播放器本体高度（面板紧贴在它下面）。
+		// 画面板。winW = 窗口宽度；baseH = 播放器本体高度（向下弹出时面板紧贴在它下面；
+		// 向上弹出时面板固定画在窗口顶部，baseH 不参与计算）。
 		// 没展开时什么都不画。
 		void Draw(Gdiplus::Graphics& g, const Playlist& playlist, float winW, float baseH) const;
 
@@ -40,6 +44,7 @@ namespace YuMediaPlayer
 
 	private:
 		bool m_open = false;
+		bool m_above = false;     // true = 面板在播放器上方
 		int  m_scroll = 0;        // 第一行可见的曲目索引
 		int  m_hoverTrack = -1;   // 鼠标悬停的曲目索引，-1 = 没有
 	};

@@ -2,12 +2,325 @@
 #include <windowsx.h>
 #include <memory>
 #include <dwmapi.h>
+#include <gdiplus.h>
 #include "Core/Theme.h"
 #include "WindowGUI.h"
+#include "Core/SettingPage.h"
 
 #pragma comment(lib, "dwmapi.lib")
+#ifndef EM_SETCUEBANNER
+#define EM_SETCUEBANNER (0x1500 + 1)   // ECM_FIRST + 1，不引入 commctrl.h 也能用
+#endif
+#pragma comment(lib, "gdiplus.lib")
 namespace YuMediaPlayer
 {
+	namespace
+	{
+		void BuildRoundRectPath(Gdiplus::GraphicsPath& path, const Gdiplus::Rect& rect, int radius)
+		{
+			int d = radius * 2;
+			if (d > rect.Width)  d = rect.Width;
+			if (d > rect.Height) d = rect.Height;
+
+			path.Reset();
+			path.AddArc(rect.X, rect.Y, d, d, 180, 90);
+			path.AddArc(rect.X + rect.Width - d, rect.Y, d, d, 270, 90);
+			path.AddArc(rect.X + rect.Width - d, rect.Y + rect.Height - d, d, d, 0, 90);
+			path.AddArc(rect.X, rect.Y + rect.Height - d, d, d, 90, 90);
+			path.CloseFigure();
+		}
+		// 圆形播放/暂停按钮：浅色圆底 + 深色三角形/暂停条
+		void DrawPlayPauseGlyph(Gdiplus::Graphics& g, float cx, float cy, float radius, bool isPlaying)
+		{
+			Gdiplus::SolidBrush circleBrush(Gdiplus::Color(255, 235, 235, 235));
+			g.FillEllipse(&circleBrush, cx - radius, cy - radius, radius * 2, radius * 2);
+
+			Gdiplus::SolidBrush glyphBrush(Gdiplus::Color(255, 28, 28, 28));
+
+			if (isPlaying)
+			{
+				float barW = radius * 0.24f;
+				float barH = radius * 0.85f;
+				float gap = radius * 0.18f;
+				g.FillRectangle(&glyphBrush, Gdiplus::RectF(cx - gap - barW, cy - barH / 2, barW, barH));
+				g.FillRectangle(&glyphBrush, Gdiplus::RectF(cx + gap, cy - barH / 2, barW, barH));
+			}
+			else
+			{
+				float w = radius * 0.9f;
+				float h = radius * 1.0f;
+				Gdiplus::PointF pts[3] = {
+					Gdiplus::PointF(cx - w * 0.32f, cy - h / 2),
+					Gdiplus::PointF(cx - w * 0.32f, cy + h / 2),
+					Gdiplus::PointF(cx + w * 0.55f, cy)
+				};
+				g.FillPolygon(&glyphBrush, pts, 3);
+			}
+		}
+		// 上一曲/下一曲：三角形 + 竖条
+		void DrawSkipGlyph(Gdiplus::Graphics& g, float cx, float cy, float size, bool isNext, Gdiplus::Color color)
+		{
+			Gdiplus::SolidBrush brush(color);
+			float triW = size * 0.5f;
+			float triH = size * 0.85f;
+			float barW = size * 0.16f;
+			float gap = size * 0.10f;
+
+			if (isNext)
+			{
+				Gdiplus::PointF tri[3] = {
+					Gdiplus::PointF(cx - triW / 2, cy - triH / 2),
+					Gdiplus::PointF(cx - triW / 2, cy + triH / 2),
+					Gdiplus::PointF(cx + triW / 2, cy)
+				};
+				g.FillPolygon(&brush, tri, 3);
+				g.FillRectangle(&brush, Gdiplus::RectF(cx + triW / 2 + gap, cy - triH / 2, barW, triH));
+			}
+			else
+			{
+				Gdiplus::PointF tri[3] = {
+					Gdiplus::PointF(cx + triW / 2, cy - triH / 2),
+					Gdiplus::PointF(cx + triW / 2, cy + triH / 2),
+					Gdiplus::PointF(cx - triW / 2, cy)
+				};
+				g.FillPolygon(&brush, tri, 3);
+				g.FillRectangle(&brush, Gdiplus::RectF(cx - triW / 2 - gap - barW, cy - triH / 2, barW, triH));
+			}
+		}
+		// 循环模式图标：0=列表循环 1=单曲循环(带"1") 2=随机播放(交叉箭头) 3=心动循环
+		void DrawLoopGlyph(Gdiplus::Graphics& g, float cx, float cy, float size, int mode, Gdiplus::Color color)
+		{
+			Gdiplus::Pen pen(color, size * 0.11f);
+			pen.SetStartCap(Gdiplus::LineCapRound);
+			pen.SetEndCap(Gdiplus::LineCapRound);
+			Gdiplus::SolidBrush brush(color);
+			if (mode == 3)
+			{
+
+			}
+			if (mode == 2)
+			{
+				float half = size * 0.42f;
+				g.DrawLine(&pen, cx - half, cy - half * 0.55f, cx + half, cy + half * 0.55f);
+				g.DrawLine(&pen, cx - half, cy + half * 0.55f, cx + half, cy - half * 0.55f);
+
+				float ah = size * 0.16f;
+				Gdiplus::PointF arrowUp[3] = {
+					Gdiplus::PointF(cx + half - ah, cy - half * 0.55f - ah),
+					Gdiplus::PointF(cx + half,      cy - half * 0.55f),
+					Gdiplus::PointF(cx + half - ah, cy - half * 0.55f + ah)
+				};
+				g.FillPolygon(&brush, arrowUp, 3);
+
+				Gdiplus::PointF arrowDown[3] = {
+					Gdiplus::PointF(cx + half - ah, cy + half * 0.55f - ah),
+					Gdiplus::PointF(cx + half,      cy + half * 0.55f),
+					Gdiplus::PointF(cx + half - ah, cy + half * 0.55f + ah)
+				};
+				g.FillPolygon(&brush, arrowDown, 3);
+				return;
+			}
+
+			float halfW = size * 0.42f;
+			float halfH = size * 0.30f;
+
+			g.DrawLine(&pen, cx - halfW * 0.5f, cy - halfH, cx + halfW * 0.5f, cy - halfH);
+			g.DrawLine(&pen, cx - halfW * 0.5f, cy + halfH, cx + halfW * 0.5f, cy + halfH);
+
+			Gdiplus::RectF rightArc(cx + halfW * 0.5f - halfH, cy - halfH, halfH * 2, halfH * 2);
+			g.DrawArc(&pen, rightArc, -90, 180);
+
+			Gdiplus::RectF leftArc(cx - halfW * 0.5f - halfH, cy - halfH, halfH * 2, halfH * 2);
+			g.DrawArc(&pen, leftArc, 90, 180);
+
+			float ah = size * 0.14f;
+			Gdiplus::PointF arrowR[3] = {
+				Gdiplus::PointF(cx + halfW * 0.5f - ah, cy - halfH - ah * 0.8f),
+				Gdiplus::PointF(cx + halfW * 0.5f - ah, cy - halfH + ah * 0.8f),
+				Gdiplus::PointF(cx + halfW * 0.5f + ah * 0.6f, cy - halfH)
+			};
+			g.FillPolygon(&brush, arrowR, 3);
+
+			if (mode == 1)
+			{
+				Gdiplus::FontFamily ff(L"Microsoft YaHei");
+				Gdiplus::Font f(&ff, size * 0.42f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+				Gdiplus::StringFormat sf;
+				sf.SetAlignment(Gdiplus::StringAlignmentCenter);
+				sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+				Gdiplus::RectF textBox(cx - size / 2, cy - size / 2, size, size);
+				g.DrawString(L"1", -1, &f, textBox, &sf, &brush);
+			}
+		}
+		// 音量图标：喇叭 + 声波弧线，volume<=0 时画静音的 X
+		void DrawVolumeGlyph(Gdiplus::Graphics& g, float cx, float cy, float size, float volume, Gdiplus::Color color)
+		{
+			Gdiplus::SolidBrush brush(color);
+			Gdiplus::Pen pen(color, size * 0.09f);
+			pen.SetStartCap(Gdiplus::LineCapRound);
+			pen.SetEndCap(Gdiplus::LineCapRound);
+
+			float bodyW = size * 0.22f;
+			float bodyH = size * 0.36f;
+			Gdiplus::RectF body(cx - size * 0.42f, cy - bodyH / 2, bodyW, bodyH);
+			g.FillRectangle(&brush, body);
+
+			Gdiplus::PointF cone[4] = {
+				Gdiplus::PointF(body.X + body.Width, body.Y),
+				Gdiplus::PointF(body.X + body.Width + size * 0.22f, cy - size * 0.34f),
+				Gdiplus::PointF(body.X + body.Width + size * 0.22f, cy + size * 0.34f),
+				Gdiplus::PointF(body.X + body.Width, body.Y + body.Height)
+			};
+			g.FillPolygon(&brush, cone, 4);
+
+			if (volume <= 0.001f)
+			{
+				float x0 = cx + size * 0.10f, x1 = cx + size * 0.34f;
+				g.DrawLine(&pen, x0, cy - size * 0.16f, x1, cy + size * 0.16f);
+				g.DrawLine(&pen, x0, cy + size * 0.16f, x1, cy - size * 0.16f);
+				return;
+			}
+
+			Gdiplus::RectF arc1(cx + size * 0.02f, cy - size * 0.22f, size * 0.30f, size * 0.44f);
+			g.DrawArc(&pen, arc1, -45, 90);
+
+			if (volume > 0.5f)
+			{
+				Gdiplus::RectF arc2(cx + size * 0.14f, cy - size * 0.34f, size * 0.46f, size * 0.68f);
+				g.DrawArc(&pen, arc2, -40, 80);
+			}
+		}
+		// 秒数 -> "mm:ss" 或 "h:mm:ss"（useHours 由调用方根据总时长决定，保证两端格式一致）
+		std::wstring FormatTime(int totalSecondsValue, bool useHours)
+		{
+			if (totalSecondsValue < 0)
+				totalSecondsValue = 0;
+
+			int hours = totalSecondsValue / 3600;
+			int minutes = (totalSecondsValue % 3600) / 60;
+			int secs = totalSecondsValue % 60;
+
+			wchar_t buf[32];
+			if (useHours)
+				swprintf_s(buf, L"%d:%02d:%02d", hours, minutes, secs);
+			else
+				swprintf_s(buf, L"%02d:%02d", minutes, secs);
+			return buf;
+		}
+		// 把白色单色 PNG 染成指定颜色再画出来（ColorMatrix：RGB 取目标色，保留原 alpha）
+		void DrawTintedIcon(Gdiplus::Graphics& g, Gdiplus::Image* img, const Gdiplus::RectF& dest, Gdiplus::Color color)
+		{
+			if (!img || img->GetLastStatus() != Gdiplus::Ok)
+				return;
+
+			Gdiplus::ColorMatrix cm = {};
+			cm.m[3][3] = 1.0f;                       // alpha 保持不变
+			cm.m[4][0] = color.GetR() / 255.0f;      // R
+			cm.m[4][1] = color.GetG() / 255.0f;      // G
+			cm.m[4][2] = color.GetB() / 255.0f;      // B
+			cm.m[4][4] = 1.0f;
+
+			Gdiplus::ImageAttributes attr;
+			attr.SetColorMatrix(&cm, Gdiplus::ColorMatrixFlagsDefault, Gdiplus::ColorAdjustTypeBitmap);
+			attr.SetWrapMode(Gdiplus::WrapModeTileFlipXY);   // 避免缩放时边缘出现杂线
+
+			g.DrawImage(img, dest, 0.0f, 0.0f,
+				(Gdiplus::REAL)img->GetWidth(), (Gdiplus::REAL)img->GetHeight(),
+				Gdiplus::UnitPixel, &attr);
+		}
+	}
+	// ===================== 右侧内容区的辅助代码 =====================
+	namespace
+	{
+		const int kContentPad = 20;      // 内容卡片内边距
+		const int kRowHeight = 48;       // 歌曲行高
+		const int kHeaderHeight = 32;    // 列表表头高度
+		const int kColIdx = 56;          // 序号列宽
+		const int kColHeart = 48;        // 爱心列宽
+		const int kColDur = 72;          // 时长列宽
+		const int kSearchHeight = 36;
+		const int kChipHeight = 30;
+		const int kSearchEditId = 1001;
+		const UINT kMsgSearchSubmit = WM_APP + 1;   // 搜索框按回车 -> 通知主窗口
+		const float kPi = 3.14159265f;
+		WNDPROC g_oldEditProc = nullptr;
+
+		int ClampInt(int v, int lo, int hi)
+		{
+			return v < lo ? lo : (v > hi ? hi : v);
+		}
+
+		// 搜索框子类化：回车触发搜索；滚轮转给主窗口（否则输入框有焦点时列表滚不动）
+		LRESULT CALLBACK SearchEditProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+		{
+			switch (msg)
+			{
+			case WM_CHAR:
+				if (wParam == VK_RETURN)
+				{
+					PostMessageW(GetParent(hwnd), kMsgSearchSubmit, 0, 0);
+					return 0;   // 吃掉回车，避免"叮"一声
+				}
+				break;
+			case WM_MOUSEWHEEL:
+				return SendMessageW(GetParent(hwnd), msg, wParam, lParam);
+			}
+			return CallWindowProcW(g_oldEditProc, hwnd, msg, wParam, lParam);
+		}
+
+		// 列表各列的横坐标。album 列放不下时 albumX == heartX（宽度为 0，不画）
+		struct ListColumns
+		{
+			int idxX, titleX, artistX, albumX, heartX, durX, endX;
+		};
+		ListColumns CalcColumns(const RECT& r)
+		{
+			ListColumns c = {};
+			int w = r.right - r.left;
+			c.idxX = r.left;
+			c.titleX = r.left + kColIdx;
+			c.durX = r.right - kColDur;
+			c.heartX = c.durX - kColHeart;
+			c.endX = r.right;
+			int rest = c.heartX - c.titleX;
+			if (rest < 0) rest = 0;
+			if (w >= 620)
+			{
+				c.albumX = c.heartX - rest * 25 / 100;
+				c.artistX = c.albumX - rest * 28 / 100;
+			}
+			else
+			{
+				c.albumX = c.heartX;
+				c.artistX = c.heartX - rest * 38 / 100;
+			}
+			return c;
+		}
+
+		// 心形（参数方程），size 为整体宽度
+		void BuildHeartPath(Gdiplus::GraphicsPath& path, float cx, float cy, float size)
+		{
+			const int n = 48;
+			Gdiplus::PointF pts[n];
+			float s = size / 32.0f;
+			for (int i = 0; i < n; i++)
+			{
+				float t = 2.0f * kPi * i / n;
+				float st = sinf(t);
+				float x = 16.0f * st * st * st;
+				float y = 13.0f * cosf(t) - 5.0f * cosf(2 * t) - 2.0f * cosf(3 * t) - cosf(4 * t);
+				pts[i] = Gdiplus::PointF(cx + x * s, cy - (y + 2.5f) * s);
+			}
+			path.Reset();
+			path.AddPolygon(pts, n);
+		}
+
+		void FormatDuration(int seconds, wchar_t* buf, size_t count)
+		{
+			if (seconds < 0) seconds = 0;
+			swprintf_s(buf, count, L"%d:%02d", seconds / 60, seconds % 60);
+		}
+	}
 	static WindowGUI* g_windowGUIInstance = nullptr;
 	enum class ButtonType
 	{
@@ -15,97 +328,161 @@ namespace YuMediaPlayer
 		Maximize = 1,   // 最大化
 		Minimize = 2,   // 最小化
 		Settings = 3,   // 设置
-		Updata = 4,     // 刷新/更新
+		Update = 4,     // 刷新/更新
 		Count = 5
 	};
 	WindowGUI::WindowGUI()
 		: m_hwnd(nullptr)
 		, m_hoverButton(-1)
 		, m_isMaximized(false)
-		, m_cornerRadius(15)  // 圆角半径，默认 15px
+		, m_cornerRadius(13)  // 圆角半径，默认 15px
+		, m_settingsIcon(nullptr)
+		, m_refreshIcon(nullptr)
+		, m_gdiplusToken(0)
 	{
 		// 保存全局实例指针，用于 WndProc 回调
 		g_windowGUIInstance = this;
 
+		// 乐馆默认分类（可用 SetCategories 替换）
+		m_categories = {
+			L"\u63A8\u8350", L"\u6D41\u884C", L"\u56FD\u8BED", L"\u6B27\u7F8E", L"\u65E5\u97E9",
+			L"\u6C11\u8C23", L"\u6447\u6EDA", L"\u7535\u5B50", L"\u53E4\u5178", L"\u7EAF\u97F3\u4E50"
+		};
+
 		for (int i = 0; i < 5; i++)
 			m_buttonRects[i] = { 0, 0, 0, 0 };
+		Gdiplus::GdiplusStartupInput gdiplusStartupInput;
+		Gdiplus::GdiplusStartup(&m_gdiplusToken, &gdiplusStartupInput, nullptr);
 	}
 
 	WindowGUI::~WindowGUI()
 	{
+		m_settingPage.reset();   // 先销毁设置页（它自己有一份 GDI+ 引用）
 		if (g_windowGUIInstance == this)
 			g_windowGUIInstance = nullptr;
+		if (m_logoIcon)
+		{
+			DestroyIcon(m_logoIcon);
+			m_logoIcon = nullptr;
+		}
+		// 释放侧边栏图标
+		for (int i = 0; i < kSidebarCount; i++)
+		{
+			delete m_sidebarIcons[i];
+			m_sidebarIcons[i] = nullptr;
+		}
+		// 清理图标资源
+		if (m_settingsIcon)
+		{
+			delete m_settingsIcon;
+			m_settingsIcon = nullptr;
+		}
+		if (m_refreshIcon)
+		{
+			delete m_refreshIcon;
+			m_refreshIcon = nullptr;
+		}
 
+		// 关闭 GDI+
+		if (m_gdiplusToken)
+		{
+			Gdiplus::GdiplusShutdown(m_gdiplusToken);
+		}
 		if (m_hwnd)
 		{
 			DestroyWindow(m_hwnd);
 			m_hwnd = nullptr;
 		}
+		m_searchEdit = nullptr;   // 子窗口随主窗口一起销毁
+		if (m_searchFont)
+		{
+			DeleteObject(m_searchFont);
+			m_searchFont = nullptr;
+		}
+		if (m_searchBrush)
+		{
+			DeleteObject(m_searchBrush);
+			m_searchBrush = nullptr;
+		}
 	}
-
+	bool WindowGUI::LoadSettingsIcon(const wchar_t* imagePath)
+	{
+		// 清理旧的图标
+		if (m_settingsIcon)
+		{
+			delete m_settingsIcon;
+			m_settingsIcon = nullptr;
+		}
+		// 加载新的图标
+		m_settingsIcon = new Gdiplus::Image(imagePath);
+		if (!m_settingsIcon || m_settingsIcon->GetLastStatus() != Gdiplus::Ok)
+		{
+			if (m_settingsIcon)
+			{
+				delete m_settingsIcon;
+				m_settingsIcon = nullptr;
+			}
+			return false;
+		}
+		return true;
+	}
+	bool WindowGUI::LoadRefreshIcon(const wchar_t* imagePath)
+	{
+		// 清理旧的图标
+		if (m_refreshIcon)
+		{
+			delete m_refreshIcon;
+			m_refreshIcon = nullptr;
+		}
+		// 加载新的图标
+		m_refreshIcon = new Gdiplus::Image(imagePath);
+		if (!m_refreshIcon || m_refreshIcon->GetLastStatus() != Gdiplus::Ok)
+		{
+			if (m_refreshIcon)
+			{
+				delete m_refreshIcon;
+				m_refreshIcon = nullptr;
+			}
+			return false;
+		}
+		return true;
+	}
 	void WindowGUI::UpdateWindowRegion()
 	{
 		if (!m_hwnd)
 			return;
-		// DWMWA_CORNER_PREFERENCE: 0=默认, 1=无, 2=小圆角, 3=中圆角, 4=大圆角
 
-		// 首先尝试使用 Windows 11 的新 API
-		typedef enum {
-			DWMWCP_DEFAULT = 0,
-			DWMWCP_DONOTROUND = 1,
-			DWMWCP_ROUND = 2,
-			DWMWCP_ROUNDSMALL = 3
-		} DWM_WINDOW_CORNER_PREFERENCE;
-
-		// 获取系统版本，确定使用哪个 API
-		OSVERSIONINFOEX osvi = {};
-		osvi.dwOSVersionInfoSize = sizeof(OSVERSIONINFOEX);
-		GetVersionExW((LPOSVERSIONINFOW)&osvi);
-
-		if (osvi.dwMajorVersion >= 10)  // Windows 10+
+		// 最大化时铺满屏幕，不需要圆角；半径为 0 也表示不要圆角
+		if (m_isMaximized || IsZoomed(m_hwnd) || m_cornerRadius <= 0)
 		{
-			// 对于 Windows 10/11，直接设置圆角偏好
-			DWM_WINDOW_CORNER_PREFERENCE preference = DWMWCP_ROUND;
-
-			HRESULT hr = DwmSetWindowAttribute(
-				m_hwnd,
-				static_cast<DWORD>(9),  // DWMWA_CORNER_PREFERENCE = 9
-				&preference,
-				sizeof(preference)
-			);
-
-			// 如果失败，使用备用的传统方法
-			if (FAILED(hr))
-			{
-				ApplyLegacyCornerRadius();
-			}
+			SetWindowRgn(m_hwnd, nullptr, TRUE);   // 清除 region
+			return;
 		}
-		else
-		{
-			// 对于 Windows 7/8，使用传统的 Region 方法
-			ApplyLegacyCornerRadius();
-		}
+		ApplyLegacyCornerRadius();
 	}
 	void WindowGUI::ApplyLegacyCornerRadius()
 	{
 		if (!m_hwnd)
 			return;
 
+		// WS_POPUP 窗口没有非客户区，窗口矩形 == 客户区矩形
 		RECT rect;
-		GetClientRect(m_hwnd, &rect);
+		GetWindowRect(m_hwnd, &rect);
+		int w = rect.right - rect.left;
+		int h = rect.bottom - rect.top;
 
-		// 创建圆角矩形 region
+		// 创建圆角矩形 region（右、下边界要 +1，否则右下角会少一像素）
 		HRGN hRgn = CreateRoundRectRgn(
 			0, 0,
-			rect.right - rect.left + 1,
-			rect.bottom - rect.top + 1,
+			w + 1,
+			h + 1,
 			m_cornerRadius * 2,  // 水平圆角直径
 			m_cornerRadius * 2   // 竖直圆角直径
 		);
 
 		if (hRgn)
 		{
-			// 设置窗口 region
+			// 设置成功后 region 的所有权归系统，不需要也不能 DeleteObject
 			SetWindowRgn(m_hwnd, hRgn, TRUE);
 		}
 	}
@@ -177,7 +554,7 @@ namespace YuMediaPlayer
 
 		HPEN hIconPen = CreatePen(PS_SOLID, 2, iconColor);
 		HPEN hOldIconPen = (HPEN)SelectObject(hdc, hIconPen);
-
+		
 		switch (btnType)
 		{
 		case 0:  // 关闭按钮 - X 符号
@@ -208,22 +585,56 @@ namespace YuMediaPlayer
 		}
 		case 3:  // 设置按钮 - 三个小圆点
 		{
-			int radius = 2;
-			for (int i = -1; i <= 1; ++i)
+			bool iconDrawn = false;
+			if (m_settingsIcon && m_settingsIcon->GetLastStatus() == Gdiplus::Ok)
 			{
-				Ellipse(hdc, centerX + i * 6 - radius, centerY - radius, centerX + i * 6 + radius, centerY + radius);
+				try
+				{
+				Gdiplus::Graphics graphics(hdc);
+				graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+				graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+				graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+				graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+					
+				int displaySize = 20;
+				int iconX = centerX - displaySize / 2;
+				int iconY = centerY - displaySize / 2;
+				graphics.DrawImage(m_settingsIcon, iconX, iconY, displaySize, displaySize);
+				iconDrawn = true;
+				}
+				catch (...)
+				{
+					iconDrawn = false;
+				}
 			}
 			break;
 		}
 		case 4:  // 更新按钮 - 刷新符号
-		{
-			int radius = 6;
-			Arc(hdc, centerX - radius, centerY - radius, centerX + radius, centerY + radius, centerX + radius, centerY, centerX, centerY - radius);
-			LineTo(hdc, centerX + 2, centerY - 2);
-			MoveToEx(hdc, centerX + 2, centerY - 2, nullptr);
-			LineTo(hdc, centerX + 4, centerY - 4);
+			{
+			bool iconDrawn = false;
+			if (m_refreshIcon && m_refreshIcon->GetLastStatus() == Gdiplus::Ok)
+			{
+				try
+				{
+					Gdiplus::Graphics graphics(hdc);
+					graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+					graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+					graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+					graphics.SetCompositingQuality(Gdiplus::CompositingQualityHighQuality);
+
+					int displaySize = 20;
+					int iconX = centerX - displaySize / 2;
+					int iconY = centerY - displaySize / 2;
+					graphics.DrawImage(m_refreshIcon, iconX, iconY, displaySize, displaySize);
+					iconDrawn = true;
+				}
+				catch (...)
+				{
+					iconDrawn = false;
+				}
+			}
 			break;
-		}
+			}
 		}
 		SelectObject(hdc, hOldIconPen);
 		DeleteObject(hIconPen);
@@ -256,9 +667,1001 @@ namespace YuMediaPlayer
 			rightX - buttonWidth, 0, rightX, buttonHeight
 		};
 		rightX -= buttonWidth;
-		m_buttonRects[static_cast<int>(ButtonType::Updata)] = {
+		m_buttonRects[static_cast<int>(ButtonType::Update)] = {
 			rightX - buttonWidth, 0, rightX, buttonHeight
 		};
+	}
+
+	void WindowGUI::UpdatePlayBarRect(int width, int height)
+	{
+		const int margin = 10;       // 左右留白
+		const int bottomMargin = 10; // 底部也留一点距离，别贴死到窗口边缘
+		const int barHeight = 120;   // 播放栏高度
+
+		m_playBarRect = {
+			margin,
+			height - bottomMargin - barHeight,
+			width - margin,
+			height - bottomMargin
+		};
+	}
+	void WindowGUI::DrawPlayBar(HDC hdc, const RECT& rect)
+	{
+		int w = rect.right - rect.left;
+		int h = rect.bottom - rect.top;
+		if (w <= 0 || h <= 0)
+			return;
+
+		Gdiplus::Graphics graphics(hdc);
+		graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+		graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+
+		const int radius = 16; // 比标题栏按钮更大一点的圆角，和整窗风格呼应
+
+		Gdiplus::GraphicsPath path;
+		BuildRoundRectPath(path, Gdiplus::Rect(rect.left, rect.top, w, h), radius);
+
+		// 背景比主窗口背景稍亮，形成一张"卡片"
+		Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 32, 32, 32));
+		graphics.FillPath(&bgBrush, &path);
+
+		// 细描边，增加层次感
+		Gdiplus::Pen borderPen(Gdiplus::Color(255, 55, 55, 55), 1.0f);
+		graphics.DrawPath(&borderPen, &path);
+		//------------------------------
+		const int paddingX = 16;
+		const int paddingY = 10;
+		const int progressAreaHeight = 22; //
+		float coverCenterY = rect.top + h / 2.0f;
+		const int albumArtSize = h - 2 * paddingY;
+
+		Gdiplus::Rect albumRect(
+			rect.left + paddingX,
+			(int)(coverCenterY - albumArtSize / 2.0f),
+			albumArtSize, albumArtSize
+		);
+
+		Gdiplus::GraphicsPath albumPath;
+		BuildRoundRectPath(albumPath, albumRect, 8);
+		Gdiplus::SolidBrush albumBrush(Gdiplus::Color(255, 60, 60, 60));
+		graphics.FillPath(&albumBrush, &albumPath);
+		// 以后接入真实封面时：graphics.DrawImage(coverImage, albumRect) 替换掉上面的占位填充即可
+		// ---- 播放控制区：循环模式 - 上一曲 - 播放/暂停 - 下一曲 - 音量 ----
+		//
+		int textLeft = albumRect.X + albumRect.Width + paddingX;
+		int textWidth = (rect.right - paddingX) - textLeft;
+		if (textWidth < 0)
+			textWidth = 0;
+
+		const float playRadius = 22.0f;
+		const float skipSize = 26.0f;
+		const float sideSize = 22.0f;
+		const float gapPlaySkip = 50.0f;   // 
+		const float gapSkipSide = 80.0f;   // 
+
+		const float titleBlockH = 24.0f;        // 
+		const float titleArtistGap = 10.0f;     //
+		const float artistBlockH = 20.0f;       // 
+		const float artistButtonsGap = 10.0f;   // 
+		const float buttonsBlockH = playRadius * 2.0f; // 
+
+		const float totalContentH = titleBlockH + titleArtistGap + artistBlockH
+			+ artistButtonsGap + buttonsBlockH;
+		float availableCenterY = rect.top + (h - progressAreaHeight) / 2.0f;
+		float blockTop = availableCenterY - totalContentH / 2.0f;
+		// 保证内容块不会跑到播放条卡片的上边缘之外
+		const float minBlockTop = rect.top + paddingY;
+		if (blockTop < minBlockTop)
+			blockTop = minBlockTop;
+
+		float titleY = blockTop;
+		float artistY = titleY + titleBlockH + titleArtistGap;
+		const float buttonsUpShift = 45.0f; // 按钮整体上移一些,与进度条留出更多间距
+		float buttonsCenterY = artistY + artistBlockH + artistButtonsGap + buttonsBlockH / 2.0f - buttonsUpShift;
+
+
+		float centerX = textLeft + textWidth / 2.0f;
+		float centerY = buttonsCenterY;
+
+		float prevCx = centerX - gapPlaySkip;
+		float nextCx = centerX + gapPlaySkip;
+		float loopCx = prevCx - gapSkipSide;
+		float volumeCx = nextCx + gapSkipSide;
+
+		m_playPauseRect = { (LONG)(centerX - playRadius), (LONG)(centerY - playRadius),
+							 (LONG)(centerX + playRadius), (LONG)(centerY + playRadius) };
+		m_prevRect = { (LONG)(prevCx - skipSize / 2 - 6), (LONG)(centerY - skipSize / 2 - 6),
+					   (LONG)(prevCx + skipSize / 2 + 6), (LONG)(centerY + skipSize / 2 + 6) };
+		m_nextRect = { (LONG)(nextCx - skipSize / 2 - 6), (LONG)(centerY - skipSize / 2 - 6),
+					   (LONG)(nextCx + skipSize / 2 + 6), (LONG)(centerY + skipSize / 2 + 6) };
+		m_loopRect = { (LONG)(loopCx - sideSize / 2 - 6), (LONG)(centerY - sideSize / 2 - 6),
+					   (LONG)(loopCx + sideSize / 2 + 6), (LONG)(centerY + sideSize / 2 + 6) };
+		m_volumeRect = { (LONG)(volumeCx - sideSize / 2 - 6), (LONG)(centerY - sideSize / 2 - 6),
+						 (LONG)(volumeCx + sideSize / 2 + 6), (LONG)(centerY + sideSize / 2 + 6) };
+
+		Gdiplus::FontFamily fontFamily(L"Microsoft YaHei");
+		Gdiplus::Font titleFont(&fontFamily, 15, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+		Gdiplus::Font artistFont(&fontFamily, 12, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+
+		Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 235, 235, 235));
+		Gdiplus::SolidBrush artistBrush(Gdiplus::Color(255, 160, 160, 160));
+
+		std::wstring title = m_nowPlayingTitle.empty() ? L"\u672A\u5728\u64AD\u653E" : m_nowPlayingTitle;
+		const std::wstring& artist = m_nowPlayingArtist;
+
+		Gdiplus::RectF titleRect(
+			(Gdiplus::REAL)textLeft, titleY,
+			(Gdiplus::REAL)textWidth, titleBlockH
+		);
+		Gdiplus::RectF artistRect(
+			(Gdiplus::REAL)textLeft, artistY,
+			(Gdiplus::REAL)textWidth, artistBlockH
+		);
+
+		Gdiplus::StringFormat format;
+		format.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+		format.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+
+		graphics.DrawString(title.c_str(), -1, &titleFont, titleRect, &format, &titleBrush);
+		if (!artist.empty())
+			graphics.DrawString(artist.c_str(), -1, &artistFont, artistRect, &format, &artistBrush);
+		// ---- 画控制按钮 ----
+		Gdiplus::Color iconColor(255, 210, 210, 210);
+		Gdiplus::Color activeColor(255, 255, 255, 255);
+
+		DrawLoopGlyph(graphics, loopCx, centerY, sideSize, m_loopMode,
+			m_loopMode == 0 ? iconColor : activeColor); // 非默认模式时点亮显示
+		DrawSkipGlyph(graphics, prevCx, centerY, skipSize, false, iconColor);
+		DrawPlayPauseGlyph(graphics, centerX, centerY, playRadius, m_isPlaying);
+		DrawSkipGlyph(graphics, nextCx, centerY, skipSize, true, iconColor);
+		DrawVolumeGlyph(graphics, volumeCx, centerY, sideSize, m_volume, iconColor);
+		// ---- 进度条：00:00 ———●——— xx:xx:xx ----
+		{
+			const int timeLabelWidth = 44;  //
+			const int labelGap = 6;
+			const int thumbRadius = 5;
+			float trackY = rect.bottom - progressAreaHeight / 2.0f - 2;  // 稍微偏上，给时间文字留baseline空间
+			float trackLeft = textLeft + timeLabelWidth + labelGap; //
+			float trackRight = rect.right - paddingX - timeLabelWidth - labelGap;
+			if (trackRight < trackLeft)
+				trackRight = trackLeft;
+
+			bool useHours = m_totalSeconds >= 3600;
+			std::wstring currentText = FormatTime(m_currentSeconds, useHours);
+			std::wstring totalText = FormatTime(m_totalSeconds, useHours);
+
+			Gdiplus::FontFamily timeFontFamily(L"Microsoft YaHei");
+			Gdiplus::Font timeFont(&timeFontFamily, 11, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+			Gdiplus::SolidBrush timeBrush(Gdiplus::Color(255, 170, 170, 170));
+
+			Gdiplus::StringFormat leftFormat;
+			leftFormat.SetAlignment(Gdiplus::StringAlignmentNear);
+			leftFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+			Gdiplus::RectF leftLabelRect((Gdiplus::REAL)textLeft, trackY - 10, (Gdiplus::REAL)timeLabelWidth, 20.0f);
+			graphics.DrawString(currentText.c_str(), -1, &timeFont, leftLabelRect, &leftFormat, &timeBrush);
+
+			Gdiplus::StringFormat rightFormat;
+			rightFormat.SetAlignment(Gdiplus::StringAlignmentFar);
+			rightFormat.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+			Gdiplus::RectF rightLabelRect(rect.right - paddingX - timeLabelWidth, trackY - 10, (Gdiplus::REAL)timeLabelWidth, 20.0f);
+			graphics.DrawString(totalText.c_str(), -1, &timeFont, rightLabelRect, &rightFormat, &timeBrush);
+
+			// 细线滑轨：底色 + 已播放部分高亮
+			Gdiplus::Pen trackPen(Gdiplus::Color(255, 75, 75, 75), 3.0f);
+			trackPen.SetStartCap(Gdiplus::LineCapRound);
+			trackPen.SetEndCap(Gdiplus::LineCapRound);
+			graphics.DrawLine(&trackPen, trackLeft, trackY, trackRight, trackY);
+
+			float progressRatio = 0.0f;
+			if (m_totalSeconds > 0)
+				progressRatio = (float)m_currentSeconds / (float)m_totalSeconds;
+			if (progressRatio < 0.0f) progressRatio = 0.0f;
+			if (progressRatio > 1.0f) progressRatio = 1.0f;
+
+			float thumbX = trackLeft + (trackRight - trackLeft) * progressRatio;
+
+			if (thumbX > trackLeft)
+			{
+				Gdiplus::Pen playedPen(Gdiplus::Color(255, 235, 235, 235), 3.0f);
+				playedPen.SetStartCap(Gdiplus::LineCapRound);
+				playedPen.SetEndCap(Gdiplus::LineCapRound);
+				graphics.DrawLine(&playedPen, trackLeft, trackY, thumbX, trackY);
+			}
+
+			// 可滑动的圆点
+			Gdiplus::SolidBrush thumbBrush(Gdiplus::Color(255, 255, 255, 255));
+			graphics.FillEllipse(&thumbBrush, thumbX - thumbRadius, trackY - thumbRadius,
+				thumbRadius * 2.0f, thumbRadius * 2.0f);
+
+			// 保存命中区域，方便以后接拖动：整条滑轨给一点上下容差，圆点单独存一份精确范围
+			m_progressBarRect = {
+				(LONG)trackLeft, (LONG)(trackY - 8),
+				(LONG)trackRight, (LONG)(trackY + 8)
+			};
+			m_progressThumbRect = {
+				(LONG)(thumbX - thumbRadius - 4), (LONG)(trackY - thumbRadius - 4),
+				(LONG)(thumbX + thumbRadius + 4), (LONG)(trackY + thumbRadius + 4)
+			};
+		}
+	}
+	
+	void WindowGUI::SetPlaying(bool playing)
+	{
+		m_isPlaying = playing;
+		if (m_hwnd)
+			InvalidateRect(m_hwnd, &m_playBarRect, FALSE);
+	}
+	void WindowGUI::SetLoopMode(int mode)
+	{
+		m_loopMode = mode % 4;
+		if (m_loopMode < 0)
+			m_loopMode += 4;
+		if (m_hwnd)
+			InvalidateRect(m_hwnd, &m_playBarRect, FALSE);
+	}
+	void WindowGUI::SetVolume(float volume)
+	{
+		if (volume < 0.0f) volume = 0.0f;
+		if (volume > 1.0f) volume = 1.0f;
+		m_volume = volume;
+		if (m_hwnd)
+			InvalidateRect(m_hwnd, &m_playBarRect, FALSE);
+	}
+	void WindowGUI::SetProgress(int currentSeconds, int totalSeconds)
+	{
+		if (m_seeking)
+			return;   // 用户正在拖进度条，别用播放器的进度覆盖他的拖动预览
+		if (totalSeconds < 0) totalSeconds = 0;
+		if (currentSeconds < 0) currentSeconds = 0;
+		if (currentSeconds > totalSeconds) currentSeconds = totalSeconds;
+
+		m_currentSeconds = currentSeconds;
+		m_totalSeconds = totalSeconds;
+
+		if (m_hwnd)
+			InvalidateRect(m_hwnd, &m_playBarRect, FALSE);
+	}
+	void WindowGUI::SetNowPlaying(const wchar_t* title, const wchar_t* artist)
+	{
+		m_nowPlayingTitle = title ? title : L"";
+		m_nowPlayingArtist = artist ? artist : L"";
+
+		if (m_hwnd)
+			InvalidateRect(m_hwnd, &m_playBarRect, FALSE); // 只重绘播放栏这一块区域,避免整窗闪烁
+	}
+
+	// 标题栏 logo 的显示尺寸和位置（想改大小/位置改这里）
+	static const int kLogoSize = 36;
+	static const int kLogoX = 55;
+	static const int kLogoY = 5;
+
+	bool WindowGUI::LoadLogoIcon()
+	{
+		if (m_logoIcon)
+		{
+			DestroyIcon(m_logoIcon);
+			m_logoIcon = nullptr;
+		}
+
+		wchar_t path[MAX_PATH] = { 0 };
+		GetModuleFileNameW(nullptr, path, MAX_PATH);
+		wchar_t* lastSlash = wcsrchr(path, L'\\');
+		if (lastSlash)
+			*lastSlash = L'\0';
+		wcscat_s(path, MAX_PATH, L"\\ui\\window\\logo.ico");
+
+		// ico 里有多种尺寸，指定目标尺寸后系统会挑最接近的一张，比手动缩放清晰
+		m_logoIcon = (HICON)LoadImageW(nullptr, path, IMAGE_ICON,
+			kLogoSize, kLogoSize, LR_LOADFROMFILE);
+		return m_logoIcon != nullptr;
+	}
+
+	bool WindowGUI::LoadSidebarIcons()
+	{
+		wchar_t exePath[MAX_PATH] = { 0 };
+		GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+		wchar_t* lastSlash = wcsrchr(exePath, L'\\');
+		if (lastSlash)
+			*lastSlash = L'\0';
+
+		static const wchar_t* kFiles[kSidebarCount] = {
+			L"Sidebar_Music.png",   // 乐馆
+			L"Sidebar_Local.png",   // 本地
+			L"Sidebar_Heart.png"    // 喜欢
+		};
+
+		bool allOk = true;
+		for (int i = 0; i < kSidebarCount; i++)
+		{
+			delete m_sidebarIcons[i];
+			m_sidebarIcons[i] = nullptr;
+
+			wchar_t path[MAX_PATH] = { 0 };
+			swprintf_s(path, MAX_PATH, L"%s\\ui\\window\\%s", exePath, kFiles[i]);
+
+			Gdiplus::Image* img = new Gdiplus::Image(path);
+			if (img->GetLastStatus() != Gdiplus::Ok)
+			{
+				delete img;
+				allOk = false;   // 图标缺失时只显示文字，不影响程序运行
+			}
+			else
+			{
+				m_sidebarIcons[i] = img;
+			}
+		}
+		return allOk;
+	}
+
+	// 计算侧边栏区域和三个按钮的位置（需在 UpdatePlayBarRect 之后调用）
+	void WindowGUI::UpdateSidebarRect(int width, int height)
+	{
+		(void)width; (void)height;
+
+		const int marginLeft = 10;
+		const int sidebarWidth = 130;
+		const int topY = 40;           // 标题栏(30px)下方留一点空隙
+		const int gapToPlayBar = 10;   // 与底部播放栏的间距
+		const int padding = 8;
+		const int itemHeight = 42;
+		const int itemGap = 6;
+
+		m_sidebarRect = {
+			marginLeft,
+			topY,
+			marginLeft + sidebarWidth,
+			m_playBarRect.top - gapToPlayBar
+		};
+
+		for (int i = 0; i < kSidebarCount; i++)
+		{
+			int y = m_sidebarRect.top + padding + i * (itemHeight + itemGap);
+			m_sidebarItemRects[i] = {
+				m_sidebarRect.left + padding,
+				y,
+				m_sidebarRect.right - padding,
+				y + itemHeight
+			};
+		}
+	}
+
+	// 图标 + 文字，选中项高亮底板 + 黄色
+	void WindowGUI::DrawSidebar(HDC hdc, const RECT& rect)
+	{
+		if (rect.right <= rect.left || rect.bottom <= rect.top)
+			return;
+
+		Gdiplus::Graphics graphics(hdc);
+		graphics.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+		graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+		graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeHighQuality);
+		graphics.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+
+		// 乐馆 / 本地 / 喜欢（用 \u 转义，避免源文件编码问题）
+		static const wchar_t* kLabels[kSidebarCount] = {
+			L"\u4E50\u9986", L"\u672C\u5730", L"\u559C\u6B22"
+		};
+
+		const Gdiplus::Color accentColor(255, 255, 204, 0);     // 选中：黄色
+		const Gdiplus::Color normalColor(255, 200, 200, 200);  // 默认：浅灰
+		const Gdiplus::Color hoverColor(255, 255, 255, 255);   // 悬停：白
+		const Gdiplus::Color selectedBg(255, 46, 46, 46);
+		const Gdiplus::Color hoverBg(255, 36, 36, 36);
+		const int itemRadius = 10;
+		const float iconSize = 22.0f;
+		const float iconPadLeft = 16.0f;
+		const float textGap = 12.0f;
+
+		Gdiplus::FontFamily fontFamily(L"Microsoft YaHei");
+		Gdiplus::Font normalFont(&fontFamily, 15, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+		Gdiplus::Font boldFont(&fontFamily, 15, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+
+		Gdiplus::StringFormat format;
+		format.SetAlignment(Gdiplus::StringAlignmentNear);
+		format.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+		format.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+		format.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+
+		for (int i = 0; i < kSidebarCount; i++)
+		{
+			const RECT& r = m_sidebarItemRects[i];
+			int w = r.right - r.left;
+			int h = r.bottom - r.top;
+			if (w <= 0 || h <= 0)
+				continue;
+
+			bool selected = (i == m_sidebarSelected);
+			bool hovered = (i == m_sidebarHover);
+
+			if (selected || hovered)
+			{
+				Gdiplus::GraphicsPath path;
+				BuildRoundRectPath(path, Gdiplus::Rect(r.left, r.top, w, h), itemRadius);
+				Gdiplus::SolidBrush bgBrush(selected ? selectedBg : hoverBg);
+				graphics.FillPath(&bgBrush, &path);
+			}
+
+			Gdiplus::Color fg = selected ? accentColor : (hovered ? hoverColor : normalColor);
+
+			float cy = r.top + h / 2.0f;
+			Gdiplus::RectF iconRect(r.left + iconPadLeft, cy - iconSize / 2.0f, iconSize, iconSize);
+			DrawTintedIcon(graphics, m_sidebarIcons[i], iconRect, fg);
+
+			float textX = iconRect.X + iconSize + textGap;
+			Gdiplus::RectF textRect(textX, (Gdiplus::REAL)r.top,
+				(Gdiplus::REAL)r.right - textX - 8.0f, (Gdiplus::REAL)h);
+			Gdiplus::SolidBrush textBrush(fg);
+			graphics.DrawString(kLabels[i], -1, selected ? &boldFont : &normalFont,
+				textRect, &format, &textBrush);
+		}
+	}
+
+	// ===================== 右侧内容区 =====================
+	void WindowGUI::RefreshLayout()
+	{
+		if (!m_hwnd)
+			return;
+		RECT rc;
+		GetClientRect(m_hwnd, &rc);
+		int w = rc.right - rc.left;
+		int h = rc.bottom - rc.top;
+		UpdateButtonRects(w);
+		UpdatePlayBarRect(w, h);
+		UpdateSidebarRect(w, h);
+		UpdateContentRects(w, h);
+		LayoutSearchEdit();
+	}
+
+	void WindowGUI::UpdateContentRects(int width, int height)
+	{
+		(void)height;
+		const int gap = 10;
+		const int marginRight = 10;
+
+		// 内容卡片：侧边栏右边 ~ 窗口右边，标题栏下方 ~ 播放栏上方
+		m_contentRect = { m_sidebarRect.right + gap, m_sidebarRect.top, width - marginRight, m_playBarRect.top - gap };
+		if (m_contentRect.right < m_contentRect.left) m_contentRect.right = m_contentRect.left;
+		if (m_contentRect.bottom < m_contentRect.top) m_contentRect.bottom = m_contentRect.top;
+
+		m_searchRect = { 0, 0, 0, 0 };
+		m_searchIconRect = { 0, 0, 0, 0 };
+		m_categoryRects.clear();
+
+		const int left = m_contentRect.left + kContentPad;
+		const int right = m_contentRect.right - kContentPad;
+		int y = m_contentRect.top + 16;
+
+		if (m_sidebarSelected == 0)
+		{
+			// 乐馆：搜索框 + 分类标签
+			int sw = right - left;
+			if (sw > 380) sw = 380;
+			if (sw < 0) sw = 0;
+			m_searchRect = { left, y, left + sw, y + kSearchHeight };
+			m_searchIconRect = { left, y, left + (sw < 40 ? sw : 40), y + kSearchHeight };
+			y += kSearchHeight + 14;
+
+			int x = left;
+			for (size_t i = 0; i < m_categories.size(); i++)
+			{
+				int w = 28 + (int)m_categories[i].size() * 14;
+				RECT r = { 0, 0, 0, 0 };
+				if (x + w <= right)
+				{
+					r = { x, y, x + w, y + kChipHeight };
+					x += w + 8;
+				}
+				else
+				{
+					x = right + 1;   // 这一个放不下，后面的也隐藏
+				}
+				m_categoryRects.push_back(r);
+			}
+			y += kChipHeight + 12;
+		}
+		else
+		{
+			// 本地 / 喜欢：页面标题 + "共 N 首"
+			y += 60;
+		}
+
+		m_listHeaderRect = { left, y, right, y + kHeaderHeight };
+		m_listRect = { left, y + kHeaderHeight, right, m_contentRect.bottom - 12 };
+		if (m_listRect.bottom < m_listRect.top)
+			m_listRect.bottom = m_listRect.top;
+	}
+
+	void WindowGUI::DrawContent(HDC hdc)
+	{
+		const int cw = m_contentRect.right - m_contentRect.left;
+		const int ch = m_contentRect.bottom - m_contentRect.top;
+		if (cw <= 0 || ch <= 0)
+			return;
+
+		Gdiplus::Graphics g(hdc);
+		g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+		g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+
+		const Gdiplus::Color accent(255, 255, 204, 0);
+		const Gdiplus::Color white(255, 240, 240, 240);
+		const Gdiplus::Color gray(255, 170, 170, 170);
+		const Gdiplus::Color dimGray(255, 130, 130, 130);
+
+		// ---- 卡片底板（和播放栏同风格）----
+		{
+			Gdiplus::GraphicsPath path;
+			BuildRoundRectPath(path, Gdiplus::Rect(m_contentRect.left, m_contentRect.top, cw, ch), 16);
+			Gdiplus::SolidBrush bg(Gdiplus::Color(255, 32, 32, 32));
+			g.FillPath(&bg, &path);
+			Gdiplus::Pen border(Gdiplus::Color(255, 55, 55, 55), 1.0f);
+			g.DrawPath(&border, &path);
+		}
+
+		Gdiplus::FontFamily family(L"Microsoft YaHei");
+		Gdiplus::Font f13(&family, 13, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+		Gdiplus::Font f14(&family, 14, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+		Gdiplus::Font f14b(&family, 14, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+		Gdiplus::Font f15(&family, 15, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+		Gdiplus::Font f24b(&family, 24, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
+
+		Gdiplus::StringFormat fmtLeft;
+		fmtLeft.SetAlignment(Gdiplus::StringAlignmentNear);
+		fmtLeft.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+		fmtLeft.SetTrimming(Gdiplus::StringTrimmingEllipsisCharacter);
+		fmtLeft.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+		Gdiplus::StringFormat fmtCenter;
+		fmtCenter.SetAlignment(Gdiplus::StringAlignmentCenter);
+		fmtCenter.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+		fmtCenter.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+		Gdiplus::StringFormat fmtRight;
+		fmtRight.SetAlignment(Gdiplus::StringAlignmentFar);
+		fmtRight.SetLineAlignment(Gdiplus::StringAlignmentCenter);
+		fmtRight.SetFormatFlags(Gdiplus::StringFormatFlagsNoWrap);
+
+		auto drawText = [&](const wchar_t* text, const Gdiplus::Font& font, const Gdiplus::Color& color,
+			float x, float y, float w, float h, const Gdiplus::StringFormat& fmt)
+		{
+			if (w <= 0 || h <= 0)
+				return;
+			Gdiplus::SolidBrush brush(color);
+			g.DrawString(text, -1, &font, Gdiplus::RectF(x, y, w, h), &fmt, &brush);
+		};
+
+		const int page = m_sidebarSelected;
+
+		if (page == 0)
+		{
+			// ---- 搜索框（胶囊形 + 放大镜；输入框本体是子窗口 EDIT，叠在上面）----
+			const RECT& sr = m_searchRect;
+			int sw = sr.right - sr.left;
+			if (sw > 0)
+			{
+				Gdiplus::GraphicsPath path;
+				BuildRoundRectPath(path, Gdiplus::Rect(sr.left, sr.top, sw, kSearchHeight), kSearchHeight / 2);
+				Gdiplus::SolidBrush pillBg(Gdiplus::Color(255, 44, 44, 44));
+				g.FillPath(&pillBg, &path);
+				Gdiplus::Pen pillBorder(m_searchFocused ? accent : Gdiplus::Color(255, 64, 64, 64), 1.0f);
+				g.DrawPath(&pillBorder, &path);
+
+				float cx = sr.left + 20.0f;
+				float cy = sr.top + kSearchHeight / 2.0f;
+				Gdiplus::Pen iconPen(Gdiplus::Color(255, 170, 170, 170), 1.8f);
+				iconPen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
+				g.DrawEllipse(&iconPen, cx - 7.0f, cy - 7.0f, 10.0f, 10.0f);
+				g.DrawLine(&iconPen, cx + 1.5f, cy + 1.5f, cx + 6.0f, cy + 6.0f);
+			}
+
+			// ---- 分类标签 ----
+			for (size_t i = 0; i < m_categoryRects.size(); i++)
+			{
+				const RECT& r = m_categoryRects[i];
+				int w = r.right - r.left;
+				int h = r.bottom - r.top;
+				if (w <= 0 || h <= 0)
+					continue;
+
+				bool selected = ((int)i == m_categorySelected);
+				bool hovered = ((int)i == m_categoryHover);
+
+				Gdiplus::GraphicsPath path;
+				BuildRoundRectPath(path, Gdiplus::Rect(r.left, r.top, w, h), h / 2);
+				Gdiplus::SolidBrush chipBg(selected ? accent
+					: (hovered ? Gdiplus::Color(255, 58, 58, 58) : Gdiplus::Color(255, 42, 42, 42)));
+				g.FillPath(&chipBg, &path);
+
+				Gdiplus::Color textColor = selected ? Gdiplus::Color(255, 28, 28, 28)
+					: (hovered ? white : Gdiplus::Color(255, 200, 200, 200));
+				drawText(m_categories[i].c_str(), selected ? f14b : f14, textColor,
+					(float)r.left, (float)r.top, (float)w, (float)h, fmtCenter);
+			}
+		}
+		else
+		{
+			// ---- 页面标题 ----
+			const wchar_t* title = (page == 1) ? L"\u672C\u5730\u97F3\u4E50" : L"\u6211\u559C\u6B22\u7684\u97F3\u4E50";
+			float tx = (float)(m_contentRect.left + kContentPad);
+			float tw = (float)(m_contentRect.right - m_contentRect.left - 2 * kContentPad);
+			drawText(title, f24b, white, tx, (float)(m_contentRect.top + 14), tw, 34.0f, fmtLeft);
+
+			wchar_t sub[64];
+			swprintf_s(sub, 64, L"\u5171 %d \u9996", (int)m_tracks[page].size());
+			drawText(sub, f13, dimGray, tx, (float)(m_contentRect.top + 48), tw, 20.0f, fmtLeft);
+		}
+
+		// ---- 列表表头 ----
+		const ListColumns c = CalcColumns(m_listHeaderRect);
+		{
+			float hy = (float)m_listHeaderRect.top;
+			float hh = (float)(m_listHeaderRect.bottom - m_listHeaderRect.top);
+			drawText(L"#", f13, dimGray, (float)c.idxX + 8, hy, (float)(kColIdx - 8), hh, fmtLeft);
+			drawText(L"\u6807\u9898", f13, dimGray, (float)c.titleX, hy, (float)(c.artistX - c.titleX - 12), hh, fmtLeft);
+			drawText(L"\u6B4C\u624B", f13, dimGray, (float)c.artistX, hy, (float)(c.albumX - c.artistX - 12), hh, fmtLeft);
+			if (c.albumX < c.heartX)
+				drawText(L"\u4E13\u8F91", f13, dimGray, (float)c.albumX, hy, (float)(c.heartX - c.albumX - 12), hh, fmtLeft);
+			drawText(L"\u65F6\u957F", f13, dimGray, (float)c.durX, hy, (float)(kColDur - 8), hh, fmtRight);
+
+			Gdiplus::Pen divider(Gdiplus::Color(255, 50, 50, 50), 1.0f);
+			g.DrawLine(&divider, (int)m_listHeaderRect.left, (int)m_listHeaderRect.bottom - 1,
+				(int)m_listHeaderRect.right, (int)m_listHeaderRect.bottom - 1);
+		}
+
+		// ---- 歌曲列表 ----
+		const std::vector<TrackItem>& list = m_tracks[page];
+		const int listW = m_listRect.right - m_listRect.left;
+		const int listH = m_listRect.bottom - m_listRect.top;
+		if (listW <= 0 || listH <= 0)
+			return;
+
+		const int total = (int)list.size() * kRowHeight;
+		const int maxScroll = total > listH ? total - listH : 0;
+		m_scroll[page] = ClampInt(m_scroll[page], 0, maxScroll);
+		const int scroll = m_scroll[page];
+
+		if (list.empty())
+		{
+			const wchar_t* msg = (page == 0) ? L"\u8F93\u5165\u5173\u952E\u8BCD\u641C\u7D22\u6B4C\u66F2\uFF0C\u6216\u9009\u62E9\u4E0A\u65B9\u5206\u7C7B"
+				: (page == 1 ? L"\u6682\u65E0\u672C\u5730\u6B4C\u66F2" : L"\u8FD8\u6CA1\u6709\u559C\u6B22\u7684\u6B4C\u66F2\uFF0C\u70B9\u51FB\u6B4C\u66F2\u53F3\u4FA7\u7684\u7231\u5FC3\u5373\u53EF\u6536\u85CF");
+			drawText(msg, f15, dimGray, (float)m_listRect.left, (float)m_listRect.top,
+				(float)listW, (float)(listH > 160 ? 160 : listH), fmtCenter);
+			return;
+		}
+
+		g.SetClip(Gdiplus::Rect(m_listRect.left, m_listRect.top, listW, listH));
+
+		int first = scroll / kRowHeight;
+		int last = (scroll + listH) / kRowHeight;
+		if (last > (int)list.size() - 1)
+			last = (int)list.size() - 1;
+
+		for (int i = first; i <= last; i++)
+		{
+			const TrackItem& t = list[i];
+			const int rowTop = m_listRect.top + i * kRowHeight - scroll;
+			const float ry = (float)rowTop;
+			const float rh = (float)kRowHeight;
+			const float cy = ry + rh / 2.0f;
+
+			bool selected = (i == m_selectedRow[page]);
+			bool hovered = (i == m_hoverRow);
+			bool playing = !m_nowPlayingTitle.empty() && t.title == m_nowPlayingTitle
+				&& (m_nowPlayingArtist.empty() || t.artist == m_nowPlayingArtist);
+
+			if (selected || hovered)
+			{
+				Gdiplus::GraphicsPath path;
+				BuildRoundRectPath(path, Gdiplus::Rect(m_listRect.left, rowTop + 2, listW, kRowHeight - 4), 8);
+				Gdiplus::SolidBrush rowBg(selected ? Gdiplus::Color(255, 50, 50, 50) : Gdiplus::Color(255, 40, 40, 40));
+				g.FillPath(&rowBg, &path);
+			}
+
+			// 序号 / 正在播放的小三角
+			if (playing)
+			{
+				float px = (float)c.idxX + 18.0f;
+				Gdiplus::PointF tri[3] = {
+					Gdiplus::PointF(px - 4.0f, cy - 5.0f),
+					Gdiplus::PointF(px - 4.0f, cy + 5.0f),
+					Gdiplus::PointF(px + 5.0f, cy)
+				};
+				Gdiplus::SolidBrush triBrush(accent);
+				g.FillPolygon(&triBrush, tri, 3);
+			}
+			else
+			{
+				wchar_t num[16];
+				swprintf_s(num, 16, L"%d", i + 1);
+				drawText(num, f14, dimGray, (float)c.idxX + 8, ry, (float)(kColIdx - 8), rh, fmtLeft);
+			}
+
+			drawText(t.title.c_str(), f15, playing ? accent : white,
+				(float)c.titleX, ry, (float)(c.artistX - c.titleX - 12), rh, fmtLeft);
+			drawText(t.artist.c_str(), f14, gray,
+				(float)c.artistX, ry, (float)(c.albumX - c.artistX - 12), rh, fmtLeft);
+			if (c.albumX < c.heartX)
+				drawText(t.album.c_str(), f14, gray,
+					(float)c.albumX, ry, (float)(c.heartX - c.albumX - 12), rh, fmtLeft);
+
+			// 爱心
+			{
+				Gdiplus::GraphicsPath heart;
+				BuildHeartPath(heart, c.heartX + kColHeart / 2.0f, cy, 16.0f);
+				if (t.favorite)
+				{
+					Gdiplus::SolidBrush heartBrush(Gdiplus::Color(255, 255, 64, 96));
+					g.FillPath(&heartBrush, &heart);
+				}
+				else
+				{
+					Gdiplus::Pen heartPen(Gdiplus::Color(255, 120, 120, 120), 1.5f);
+					g.DrawPath(&heartPen, &heart);
+				}
+			}
+
+			wchar_t dur[16];
+			FormatDuration(t.durationSeconds, dur, 16);
+			drawText(dur, f14, gray, (float)c.durX, ry, (float)(kColDur - 8), rh, fmtRight);
+		}
+		g.ResetClip();
+
+		// ---- 滚动条 ----
+		if (maxScroll > 0)
+		{
+			int thumbH = (int)((long long)listH * listH / total);
+			if (thumbH < 30) thumbH = 30;
+			int thumbY = m_listRect.top + (int)((long long)(listH - thumbH) * scroll / maxScroll);
+			Gdiplus::GraphicsPath thumb;
+			BuildRoundRectPath(thumb, Gdiplus::Rect(m_contentRect.right - 12, thumbY, 4, thumbH), 2);
+			Gdiplus::SolidBrush thumbBrush(Gdiplus::Color(255, 90, 90, 90));
+			g.FillPath(&thumbBrush, &thumb);
+		}
+	}
+
+	void WindowGUI::CreateSearchEdit()
+	{
+		if (m_searchEdit || !m_hwnd)
+			return;
+
+		m_searchBrush = CreateSolidBrush(RGB(44, 44, 44));   // 和搜索胶囊同色
+		m_searchFont = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+			DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+			CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
+
+		m_searchEdit = CreateWindowExW(0, L"EDIT", L"",
+			WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | ES_LEFT,
+			0, 0, 10, 10,
+			m_hwnd, (HMENU)(INT_PTR)kSearchEditId, GetModuleHandleW(nullptr), nullptr);
+		if (!m_searchEdit)
+			return;
+
+		SendMessageW(m_searchEdit, WM_SETFONT, (WPARAM)m_searchFont, TRUE);
+		SendMessageW(m_searchEdit, EM_LIMITTEXT, 100, 0);
+		// 灰色提示文字（需要程序启用 Common Controls v6 清单才会显示，否则忽略，不影响使用）
+		SendMessageW(m_searchEdit, EM_SETCUEBANNER, TRUE, (LPARAM)L"\u641C\u7D22\u6B4C\u66F2\u3001\u6B4C\u624B");
+		g_oldEditProc = (WNDPROC)SetWindowLongPtrW(m_searchEdit, GWLP_WNDPROC, (LONG_PTR)SearchEditProc);
+	}
+
+	void WindowGUI::LayoutSearchEdit()
+	{
+		if (!m_searchEdit)
+			return;
+
+		bool show = (m_sidebarSelected == 0) && (m_searchRect.right - m_searchRect.left > 90);
+		if (show)
+		{
+			const int h = 22;
+			int x = m_searchRect.left + 40;                  // 让出左侧放大镜
+			int w = m_searchRect.right - 16 - x;
+			int y = m_searchRect.top + (kSearchHeight - h) / 2;
+			MoveWindow(m_searchEdit, x, y, w, h, TRUE);
+			ShowWindow(m_searchEdit, SW_SHOW);
+		}
+		else
+		{
+			if (GetFocus() == m_searchEdit)
+				SetFocus(m_hwnd);
+			ShowWindow(m_searchEdit, SW_HIDE);
+		}
+	}
+
+	void WindowGUI::SubmitSearch()
+	{
+		wchar_t buf[256] = { 0 };
+		if (m_searchEdit)
+			GetWindowTextW(m_searchEdit, buf, 256);
+		if (m_onSearch)
+			m_onSearch(buf);
+	}
+
+	int WindowGUI::HitTestRow(POINT pt) const
+	{
+		if (!PtInRect(&m_listRect, pt))
+			return -1;
+		const int page = m_sidebarSelected;
+		int idx = (pt.y - m_listRect.top + m_scroll[page]) / kRowHeight;
+		return (idx >= 0 && idx < (int)m_tracks[page].size()) ? idx : -1;
+	}
+
+	void WindowGUI::UpdateContentHover(POINT pt)
+	{
+		if (!m_hwnd)
+			return;
+
+		auto armLeave = [this]()
+		{
+			TRACKMOUSEEVENT tme = {};
+			tme.cbSize = sizeof(TRACKMOUSEEVENT);
+			tme.hwndTrack = m_hwnd;
+			tme.dwFlags = TME_LEAVE;
+			TrackMouseEvent(&tme);
+		};
+
+		// 列表行
+		int newRow = HitTestRow(pt);
+		if (newRow != m_hoverRow)
+		{
+			m_hoverRow = newRow;
+			InvalidateRect(m_hwnd, &m_listRect, FALSE);
+			if (newRow >= 0)
+				armLeave();
+		}
+
+		// 分类标签（只有乐馆页才有）
+		int newCat = -1;
+		for (size_t i = 0; i < m_categoryRects.size(); i++)
+		{
+			if (PtInRect(&m_categoryRects[i], pt))
+			{
+				newCat = (int)i;
+				break;
+			}
+		}
+		if (newCat != m_categoryHover)
+		{
+			if (m_categoryHover >= 0 && m_categoryHover < (int)m_categoryRects.size())
+			{
+				RECT r = m_categoryRects[m_categoryHover];
+				InflateRect(&r, 2, 2);
+				InvalidateRect(m_hwnd, &r, FALSE);
+			}
+			if (newCat >= 0)
+			{
+				RECT r = m_categoryRects[newCat];
+				InflateRect(&r, 2, 2);
+				InvalidateRect(m_hwnd, &r, FALSE);
+				armLeave();
+			}
+			m_categoryHover = newCat;
+		}
+	}
+
+	bool WindowGUI::HandleContentClick(POINT pt)
+	{
+		if (!m_hwnd || !PtInRect(&m_contentRect, pt))
+			return false;
+
+		const int page = m_sidebarSelected;
+		if (page == 0)
+		{
+			if (PtInRect(&m_searchIconRect, pt))
+			{
+				SubmitSearch();
+				return true;
+			}
+			for (size_t i = 0; i < m_categoryRects.size(); i++)
+			{
+				if (PtInRect(&m_categoryRects[i], pt))
+				{
+					m_categorySelected = (int)i;
+					InvalidateRect(m_hwnd, &m_contentRect, FALSE);
+					if (m_onCategory)
+						m_onCategory((int)i, m_categories[i]);
+					return true;
+				}
+			}
+		}
+
+		int row = HitTestRow(pt);
+		if (row < 0)
+			return false;
+
+		const ListColumns c = CalcColumns(m_listHeaderRect);
+		if (pt.x >= c.heartX && pt.x < c.heartX + kColHeart)
+		{
+			// 点爱心：翻转收藏状态，具体存盘/同步由外部回调处理
+			TrackItem& t = m_tracks[page][row];
+			t.favorite = !t.favorite;
+			InvalidateRect(m_hwnd, &m_listRect, FALSE);
+			if (m_onFavoriteToggle)
+				m_onFavoriteToggle(page, row);
+		}
+		else
+		{
+			m_selectedRow[page] = row;
+			InvalidateRect(m_hwnd, &m_listRect, FALSE);
+		}
+		return true;
+	}
+
+	void WindowGUI::ScrollList(int deltaPixels)
+	{
+		if (!m_hwnd)
+			return;
+		const int page = m_sidebarSelected;
+		int listH = m_listRect.bottom - m_listRect.top;
+		int total = (int)m_tracks[page].size() * kRowHeight;
+		int maxScroll = total > listH ? total - listH : 0;
+
+		int newScroll = ClampInt(m_scroll[page] + deltaPixels, 0, maxScroll);
+		if (newScroll == m_scroll[page])
+			return;
+		m_scroll[page] = newScroll;
+
+		// 滚动后鼠标下面的行变了，重新算悬停行
+		POINT pt;
+		GetCursorPos(&pt);
+		ScreenToClient(m_hwnd, &pt);
+		m_hoverRow = HitTestRow(pt);
+
+		RECT r = m_listRect;
+		r.right = m_contentRect.right;   // 连同右侧滚动条一起刷新
+		InvalidateRect(m_hwnd, &r, FALSE);
+	}
+
+	void WindowGUI::SetTracksInternal(int page, std::vector<TrackItem> tracks)
+	{
+		if (page < 0 || page >= kSidebarCount)
+			return;
+		m_tracks[page] = std::move(tracks);
+		m_scroll[page] = 0;
+		m_selectedRow[page] = -1;
+		m_hoverRow = -1;
+		if (m_hwnd)
+			InvalidateRect(m_hwnd, &m_contentRect, FALSE);
+	}
+	void WindowGUI::SetOnlineTracks(std::vector<TrackItem> tracks) { SetTracksInternal(0, std::move(tracks)); }
+	void WindowGUI::SetLocalTracks(std::vector<TrackItem> tracks) { SetTracksInternal(1, std::move(tracks)); }
+	void WindowGUI::SetFavoriteTracks(std::vector<TrackItem> tracks) { SetTracksInternal(2, std::move(tracks)); }
+
+	void WindowGUI::SetCategories(std::vector<std::wstring> categories)
+	{
+		m_categories = std::move(categories);
+		m_categorySelected = 0;
+		m_categoryHover = -1;
+		if (m_hwnd)
+		{
+			RefreshLayout();
+			InvalidateRect(m_hwnd, &m_contentRect, FALSE);
+		}
+	}
+	void WindowGUI::SetSearchCallback(std::function<void(const std::wstring&)> callback) { m_onSearch = std::move(callback); }
+	void WindowGUI::SetCategoryCallback(std::function<void(int, const std::wstring&)> callback) { m_onCategory = std::move(callback); }
+	void WindowGUI::SetTrackActivateCallback(std::function<void(int, int)> callback) { m_onTrackActivate = std::move(callback); }
+	void WindowGUI::SetFavoriteToggleCallback(std::function<void(int, int)> callback) { m_onFavoriteToggle = std::move(callback); }
+
+	void WindowGUI::SetSidebarSelected(int index)
+	{
+		if (index < 0 || index >= kSidebarCount || index == m_sidebarSelected)
+			return;
+		m_sidebarSelected = index;
+		m_hoverRow = -1;
+		m_categoryHover = -1;
+		if (m_hwnd)
+		{
+			// 切页：重新布局（乐馆显示搜索框，其他页隐藏），再刷新侧边栏和内容区
+			RefreshLayout();
+			InvalidateRect(m_hwnd, &m_sidebarRect, FALSE);
+			InvalidateRect(m_hwnd, &m_contentRect, FALSE);
+		}
+	}
+
+	int WindowGUI::GetSidebarSelected() const
+	{
+		return m_sidebarSelected;
+	}
+
+	void WindowGUI::SetSidebarCallback(std::function<void(int)> callback)
+	{
+		m_onSidebarSelect = std::move(callback);
 	}
 
 	LRESULT WindowGUI::EventProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
@@ -277,19 +1680,121 @@ namespace YuMediaPlayer
 			// 这里可以选择隐藏而不是销毁
 			CloseToMini();
 			return 0;
+		case WM_SIZE:
+			// 窗口大小改变（拖动边缘/最大化/还原）后，region 必须跟着重建
+			if (wParam != SIZE_MINIMIZED)
+			{
+				RefreshLayout();        // 重算各区域，并移动搜索框
+				UpdateWindowRegion();
+			}
+			return 0;
+		case WM_CTLCOLOREDIT:
+			// 搜索框的文字/背景颜色，和搜索胶囊保持一致
+			if (m_searchEdit && (HWND)lParam == m_searchEdit)
+			{
+				HDC hEditDc = (HDC)wParam;
+				SetTextColor(hEditDc, RGB(235, 235, 235));
+				SetBkColor(hEditDc, RGB(44, 44, 44));
+				return (LRESULT)m_searchBrush;
+			}
+			return DefWindowProcW(hwnd, msg, wParam, lParam);
+		case WM_COMMAND:
+			if (LOWORD(wParam) == kSearchEditId)
+			{
+				// 输入框获得/失去焦点：胶囊边框变黄/变灰
+				if (HIWORD(wParam) == EN_SETFOCUS || HIWORD(wParam) == EN_KILLFOCUS)
+				{
+					m_searchFocused = (HIWORD(wParam) == EN_SETFOCUS);
+					InvalidateRect(hwnd, &m_searchRect, FALSE);
+				}
+				return 0;
+			}
+			return DefWindowProcW(hwnd, msg, wParam, lParam);
+		case kMsgSearchSubmit:
+			SubmitSearch();
+			return 0;
+		case WM_LBUTTONDOWN:
+		{
+			// 点搜索框区域 -> 输入框拿焦点；点别处 -> 主窗口拿焦点（输入框失焦）
+			POINT pt;
+			pt.x = GET_X_LPARAM(lParam);
+			pt.y = GET_Y_LPARAM(lParam);
+			// 点进度条：开始拖动（拖动中只预览，松手才真正跳转）
+			if (m_onSeek && m_totalSeconds > 0 && PtInRect(&m_progressBarRect, pt))
+			{
+				m_seeking = true;
+				SetCapture(hwnd);
+				m_currentSeconds = (int)(SeekRatioFromX(pt.x) * m_totalSeconds + 0.5f);
+				InvalidateRect(hwnd, &m_playBarRect, FALSE);
+				return 0;
+			}
+			if (m_searchEdit && IsWindowVisible(m_searchEdit) && PtInRect(&m_searchRect, pt))
+				SetFocus(m_searchEdit);
+			else
+				SetFocus(hwnd);
+			return 0;
+		}
+		case WM_LBUTTONDBLCLK:
+		{
+			// 双击歌曲 -> 通知外部开始播放
+			POINT pt;
+			pt.x = GET_X_LPARAM(lParam);
+			pt.y = GET_Y_LPARAM(lParam);
+			int row = HitTestRow(pt);
+			if (row >= 0)
+			{
+				const ListColumns c = CalcColumns(m_listHeaderRect);
+				bool onHeart = (pt.x >= c.heartX && pt.x < c.heartX + kColHeart);
+				if (!onHeart)
+				{
+					m_selectedRow[m_sidebarSelected] = row;
+					InvalidateRect(hwnd, &m_listRect, FALSE);
+					if (m_onTrackActivate)
+						m_onTrackActivate(m_sidebarSelected, row);
+				}
+			}
+			return 0;
+		}
+		case WM_MOUSEWHEEL:
+		{
+			// 滚轮坐标是屏幕坐标；一格滚 3 行
+			POINT pt;
+			pt.x = GET_X_LPARAM(lParam);
+			pt.y = GET_Y_LPARAM(lParam);
+			ScreenToClient(hwnd, &pt);
+			if (PtInRect(&m_contentRect, pt))
+			{
+				int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+				ScrollList(-delta * (kRowHeight * 3) / WHEEL_DELTA);
+			}
+			return 0;
+		}
+		case WM_ERASEBKGND:
+			// 背景由 WM_PAINT 里的双缓冲自己画，禁止系统擦背景，避免闪烁
+			return 1;
 		case WM_PAINT:
 		{
 			// 绘制窗口
 			PAINTSTRUCT ps;
-			HDC hdc = BeginPaint(hwnd, &ps);
+			HDC hdcWnd = BeginPaint(hwnd, &ps);   // 屏幕 DC
 
 			RECT rc;
 			GetClientRect(hwnd, &rc);
 			int width = rc.right - rc.left;
 			int height = rc.bottom - rc.top;
 
+			// ★ 双缓冲：先画到内存 DC，再一次性 BitBlt 到屏幕，避免闪烁
+			HDC hdc = CreateCompatibleDC(hdcWnd);
+			HBITMAP hMemBmp = CreateCompatibleBitmap(hdcWnd, width, height);
+			HBITMAP hOldBmp = (HBITMAP)SelectObject(hdc, hMemBmp);
+
 			// 更新按钮位置
 			UpdateButtonRects(width);
+
+			// 更新播放栏位置
+			UpdatePlayBarRect(width, height);
+			UpdateSidebarRect(width, height);   // 侧边栏位置依赖播放栏位置
+			UpdateContentRects(width, height);  // 内容区位置依赖侧边栏和播放栏
 
 			// 绘制背景
 			HBRUSH hBgBrush = CreateSolidBrush(RGB(24, 24, 24));
@@ -314,17 +1819,21 @@ namespace YuMediaPlayer
 			//SetBkMode(hdc, TRANSPARENT);
 			//SetTextColor(hdc, RGB(200, 200, 200));
 
-			HFONT hFont = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+			/*HFONT hFont = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
 				DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
 				DEFAULT_QUALITY, DEFAULT_PITCH, L"Microsoft YaHei");
-			HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
+			HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);*/
 
 			/*RECT textRect = { 10, 0, width - 150, 36 };
 			DrawTextW(hdc, L"YuMediaPlayer", -1, &textRect,
 				DT_LEFT | DT_VCENTER | DT_SINGLELINE);*/
 
-			SelectObject(hdc, hOldFont);
-			DeleteObject(hFont);
+			/*	SelectObject(hdc, hOldFont);
+			DeleteObject(hFont);*/
+
+			// 绘制标题栏左上角 logo
+			if (m_logoIcon)
+				DrawIconEx(hdc, kLogoX, kLogoY, m_logoIcon, kLogoSize, kLogoSize, 0, nullptr, DI_NORMAL);
 
 			// 绘制按钮
 			for (int i = 0; i < 5; i++)
@@ -332,6 +1841,23 @@ namespace YuMediaPlayer
 				bool hovered = (m_hoverButton == i);
 				DrawButton(hdc, m_buttonRects[i], hovered, i);
 			}
+			// 绘制播放栏
+			DrawPlayBar(hdc, m_playBarRect);
+			// 绘制左侧导航栏
+			DrawSidebar(hdc, m_sidebarRect);
+			// 绘制右侧内容区（乐馆/本地/喜欢）
+			DrawContent(hdc);
+			
+			// ★ 只把需要刷新的区域贴到屏幕
+			BitBlt(hdcWnd,
+				ps.rcPaint.left, ps.rcPaint.top,
+				ps.rcPaint.right - ps.rcPaint.left,
+				ps.rcPaint.bottom - ps.rcPaint.top,
+				hdc, ps.rcPaint.left, ps.rcPaint.top, SRCCOPY);
+
+			SelectObject(hdc, hOldBmp);
+			DeleteObject(hMemBmp);
+			DeleteDC(hdc);
 
 			EndPaint(hwnd, &ps);
 			return 0;
@@ -341,6 +1867,14 @@ namespace YuMediaPlayer
 			POINT pt;
 			pt.x = GET_X_LPARAM(lParam);
 			pt.y = GET_Y_LPARAM(lParam);
+
+			// 拖动进度条：实时预览当前位置
+			if (m_seeking)
+			{
+				m_currentSeconds = (int)(SeekRatioFromX(pt.x) * m_totalSeconds + 0.5f);
+				InvalidateRect(hwnd, &m_playBarRect, FALSE);
+				return 0;
+			}
 
 			int newHoverButton = -1;
 			for (int i = 0; i < 5; i++)
@@ -355,8 +1889,21 @@ namespace YuMediaPlayer
 			// 如果悬停状态改变，重绘
 			if (newHoverButton != m_hoverButton)
 			{
+				int oldHoverButton = m_hoverButton;
 				m_hoverButton = newHoverButton;
-				InvalidateRect(hwnd, nullptr, FALSE);
+				// 只重绘状态变化的两个按钮，不刷新整个窗口
+				if (oldHoverButton >= 0)
+				{
+					RECT r = m_buttonRects[oldHoverButton];
+					InflateRect(&r, 2, 2);
+					InvalidateRect(hwnd, &r, FALSE);
+				}
+				if (newHoverButton >= 0)
+				{
+					RECT r = m_buttonRects[newHoverButton];
+					InflateRect(&r, 2, 2);
+					InvalidateRect(hwnd, &r, FALSE);
+				}
 
 				// 启用鼠标离开事件
 				if (newHoverButton >= 0)
@@ -369,14 +1916,54 @@ namespace YuMediaPlayer
 				}
 			}
 
+			// 侧边栏悬停
+			int newHoverSidebar = -1;
+			for (int i = 0; i < kSidebarCount; i++)
+			{
+				if (PtInRect(&m_sidebarItemRects[i], pt))
+				{
+					newHoverSidebar = i;
+					break;
+				}
+			}
+			if (newHoverSidebar != m_sidebarHover)
+			{
+				m_sidebarHover = newHoverSidebar;
+				InvalidateRect(hwnd, &m_sidebarRect, FALSE);
+
+				if (newHoverSidebar >= 0)
+				{
+					TRACKMOUSEEVENT sideTme = {};
+					sideTme.cbSize = sizeof(TRACKMOUSEEVENT);
+					sideTme.hwndTrack = hwnd;
+					sideTme.dwFlags = TME_LEAVE;
+					TrackMouseEvent(&sideTme);
+				}
+			}
+
+			UpdateContentHover(pt);   // 列表行 / 分类标签悬停
+
 			return 0;
 		}
 		case WM_MOUSELEAVE:
 		{
+			if (m_hoverRow >= 0 || m_categoryHover >= 0)
+			{
+				m_hoverRow = -1;
+				m_categoryHover = -1;
+				InvalidateRect(hwnd, &m_contentRect, FALSE);
+			}
+			if (m_sidebarHover >= 0)
+			{
+				m_sidebarHover = -1;
+				InvalidateRect(hwnd, &m_sidebarRect, FALSE);
+			}
 			if (m_hoverButton >= 0)
 			{
+				RECT r = m_buttonRects[m_hoverButton];
+				InflateRect(&r, 2, 2);
 				m_hoverButton = -1;
-				InvalidateRect(hwnd, nullptr, FALSE);
+				InvalidateRect(hwnd, &r, FALSE);
 			}
 			return 0;
 		}
@@ -385,6 +1972,19 @@ namespace YuMediaPlayer
 			POINT pt;
 			pt.x = GET_X_LPARAM(lParam);
 			pt.y = GET_Y_LPARAM(lParam);
+
+			// 进度条拖动结束：真正跳转
+			if (m_seeking)
+			{
+				m_seeking = false;
+				ReleaseCapture();
+				const float ratio = SeekRatioFromX(pt.x);
+				m_currentSeconds = (int)(ratio * m_totalSeconds + 0.5f);
+				InvalidateRect(hwnd, &m_playBarRect, FALSE);
+				if (m_onSeek)
+					m_onSeek(ratio);
+				return 0;
+			}
 
 			// 检查按钮点击
 			if (PtInRect(&m_buttonRects[static_cast<int>(ButtonType::Close)], pt))
@@ -416,7 +2016,68 @@ namespace YuMediaPlayer
 				ShowWindow(hwnd, SW_MINIMIZE);
 				return 0;
 			}
+			else if (PtInRect(&m_buttonRects[static_cast<int>(ButtonType::Settings)], pt))
+			{
+				YuMediaPlayer::SettingPage& settingPage = GetSettingPage();   // 改成成员：MainWindow 也要给它挂目录回调
 
+				if (!settingPage.Show(hwnd))
+				{
+					MessageBoxW(
+						hwnd,
+						L"设置窗口创建失败。",
+						L"YuMediaPlayer",
+						MB_OK | MB_ICONERROR
+					);
+				}
+				if (m_onCheckSettings)
+				{
+					m_onCheckSettings();
+				}
+				// 设置按钮：功能待实现
+				return 0;
+			}
+			else if (PtInRect(&m_buttonRects[static_cast<int>(ButtonType::Update)], pt))
+			{
+				// 更新按钮
+				if (m_onCheckUpdate)
+				{
+					m_onCheckUpdate();
+				}
+				return 0;
+			}
+			// 播放栏：播放/暂停、上一曲、下一曲（和迷你窗口共用同一套逻辑，由外部回调实现）
+			if (PtInRect(&m_playPauseRect, pt))
+			{
+				if (m_onPlayPause)
+					m_onPlayPause();
+				return 0;
+			}
+			if (PtInRect(&m_prevRect, pt))
+			{
+				if (m_onPrev)
+					m_onPrev();
+				return 0;
+			}
+			if (PtInRect(&m_nextRect, pt))
+			{
+				if (m_onNext)
+					m_onNext();
+				return 0;
+			}
+			// 侧边栏按钮（乐馆 / 本地 / 喜欢）
+			for (int i = 0; i < kSidebarCount; i++)
+			{
+				if (PtInRect(&m_sidebarItemRects[i], pt))
+				{
+					SetSidebarSelected(i);
+					if (m_onSidebarSelect)
+						m_onSidebarSelect(i);
+					return 0;
+				}
+			}
+			// 右侧内容区：分类标签 / 放大镜 / 爱心 / 选中歌曲
+			if (HandleContentClick(pt))
+				return 0;
 			// 标题栏拖动（如果点击不在按钮上）
 			if (pt.y < 30)
 			{
@@ -488,7 +2149,7 @@ namespace YuMediaPlayer
 		{
 			WNDCLASSEXW wc = {};
 			wc.cbSize = sizeof(WNDCLASSEXW);
-			wc.style = CS_HREDRAW | CS_VREDRAW;
+			wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;   // CS_DBLCLKS：支持双击歌曲播放
 			wc.lpfnWndProc = WndProc;        // ★ 使用静态回调函数
 			wc.cbClsExtra = 0;
 			wc.cbWndExtra = 0;
@@ -514,7 +2175,7 @@ namespace YuMediaPlayer
 			WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
 			CLASS_NAME,
 			title,
-			WS_POPUP,                         // 弹出式窗口，无标题栏
+			WS_POPUP | WS_CLIPCHILDREN,       // 弹出式窗口，无标题栏；CLIPCHILDREN：重绘时不覆盖搜索框子窗口
 			100, 100,                         // 初始位置
 			width = 1200, height = 720,           // 宽高
 			nullptr,                          // 父窗口
@@ -525,6 +2186,23 @@ namespace YuMediaPlayer
 
 		if (!m_hwnd)
 			return false;
+		// 加载 Settings 和 Refresh 图标
+		{
+			wchar_t exePath[MAX_PATH] = { 0 };
+			GetModuleFileNameW(nullptr, exePath, MAX_PATH);
+			wchar_t* lastSlash = wcsrchr(exePath, L'\\');
+			if (lastSlash)
+				*lastSlash = L'\0';
+
+			wchar_t iconPath[MAX_PATH] = { 0 };
+			swprintf_s(iconPath, MAX_PATH, L"%s\\ui\\window\\Window10Settings.png", exePath);
+			LoadSettingsIcon(iconPath); 
+			swprintf_s(iconPath, MAX_PATH, L"%s\\ui\\window\\Window10Refresh.png", exePath);
+			LoadRefreshIcon(iconPath);
+			LoadLogoIcon();       // ui\\window\\logo.ico
+			LoadSidebarIcons();   // ui\\window\\Sidebar_Music/Local/Heart.png
+
+		}
 
 		// 步骤 3：居中到屏幕中央
 		{
@@ -541,6 +2219,13 @@ namespace YuMediaPlayer
 			SetWindowPos(m_hwnd, nullptr, posX, posY, width, height,
 				SWP_NOZORDER | SWP_NOACTIVATE);
 		}
+		
+		// 创建乐馆页的搜索框，并计算布局
+		CreateSearchEdit();
+		RefreshLayout();
+
+		// 应用圆角（窗口尺寸已确定）
+		UpdateWindowRegion();
 
 		// 步骤 4：显示窗口
 		ShowWindow(m_hwnd, SW_SHOW);
@@ -648,5 +2333,39 @@ namespace YuMediaPlayer
 			::SetWindowPos(m_miniHwnd, HWND_TOPMOST, 0, 0, 0, 0,
 				SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
 		}
+	}
+
+	void WindowGUI::SetUpdateCallback(std::function<void()> callback)
+	{
+		m_onCheckUpdate = std::move(callback);
+	}
+	void WindowGUI::SetSettingsCallback(std::function<void()> callback)
+	{
+		m_onCheckSettings = std::move(callback);
+	}
+
+	// ---- 播放栏联动 ----
+	void WindowGUI::SetPrevCallback(std::function<void()> callback) { m_onPrev = std::move(callback); }
+	void WindowGUI::SetNextCallback(std::function<void()> callback) { m_onNext = std::move(callback); }
+	void WindowGUI::SetPlayPauseCallback(std::function<void()> callback) { m_onPlayPause = std::move(callback); }
+	void WindowGUI::SetSeekCallback(std::function<void(float)> callback) { m_onSeek = std::move(callback); }
+
+	float WindowGUI::SeekRatioFromX(int x) const
+	{
+		const int l = m_progressBarRect.left;
+		const int r = m_progressBarRect.right;
+		if (r <= l)
+			return 0.0f;
+		float v = (float)(x - l) / (float)(r - l);
+		if (v < 0.0f) v = 0.0f;
+		if (v > 1.0f) v = 1.0f;
+		return v;
+	}
+
+	SettingPage& WindowGUI::GetSettingPage()
+	{
+		if (!m_settingPage)
+			m_settingPage = std::make_unique<SettingPage>();
+		return *m_settingPage;
 	}
 }

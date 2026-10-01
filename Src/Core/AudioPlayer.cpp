@@ -724,13 +724,21 @@ namespace YuMediaPlayer
 
 	bool AudioPlayer::SetPosition(long long positionMs)
 	{
-		if (!m_mediaSession || positionMs < 0 || positionMs > m_duration)
+		if (!m_mediaSession || m_playbackState == PlaybackState::Stopped
+			|| positionMs < 0 || positionMs > m_duration)
 			return false;
 
-		// 暂停
-		HRESULT hr = m_mediaSession->Pause();
-		if (FAILED(hr))
-			return false;
+		// 暂停状态下拖进度条：跳完以后仍然保持暂停，不要自己又播起来。
+		const bool wasPaused = (m_playbackState == PlaybackState::Paused);
+
+		// 暂停（已经暂停的会话再 Pause 会返回失败，所以只在播放中才调）
+		HRESULT hr = S_OK;
+		if (!wasPaused)
+		{
+			hr = m_mediaSession->Pause();
+			if (FAILED(hr))
+				return false;
+		}
 
 		// 设置位置
 		MFTIME position = positionMs * 10000; // 转换为 MFTIME
@@ -745,7 +753,16 @@ namespace YuMediaPlayer
 
 		if (SUCCEEDED(hr))
 		{
-			m_playbackState = PlaybackState::Playing;
+			if (wasPaused)
+			{
+				// Start 之后立刻再暂停：位置已经移过去了，只是不出声。
+				m_mediaSession->Pause();
+				m_playbackState = PlaybackState::Paused;
+			}
+			else
+			{
+				m_playbackState = PlaybackState::Playing;
+			}
 			return true;
 		}
 		return false;

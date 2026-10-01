@@ -64,7 +64,10 @@ public:
     //       m_trayIcon.ReloadIconForDpi();  // 刷新托盘图标
     //       break;
     void ReloadIconForDpi();
-
+    void CheckUpdate(); // 检查更新
+    std::wstring HttpGet(const std::wstring& url); // 请求GitHub API
+    std::wstring ParseLatestVersion(const std::string& json); // 解析版本号
+	void CheckSettings(); // 
 private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg,
         WPARAM wParam, LPARAM lParam);
@@ -72,10 +75,7 @@ private:
     void ShowContextMenu();
     static void CALLBACK BlinkTimerProc(HWND hwnd, UINT msg,
         UINT_PTR id, DWORD time);
-    void CheckUpdate();                          // 检查更新
-    std::wstring HttpGet(const std::wstring& url); // 请求GitHub API
-    std::wstring ParseLatestVersion(const std::string& json); // 解析版本号
-    
+
     HINSTANCE               m_hInstance;
     HWND                    m_hwnd;
     HWND                    m_parentHwnd;

@@ -28,6 +28,11 @@ namespace YuMediaPlayer
 		// 第一个存在的就是它的封面。
 		int LoadFromDirectory(const std::wstring& audioDir, const std::vector<std::wstring>& coverDirs);
 
+		// 用外部扫描结果（比如 LocalMusicScanner）替换整个列表，随机播放的"历史"一并清空。
+		// keepCurrentPath 非空且在新列表里能找到时，当前曲目指向它（正在播放的歌换列表后不会丢），
+		// 此时返回 true；否则当前曲目回到第 0 首并返回 false。
+		bool ReplaceAll(std::vector<Track> tracks, const std::wstring& keepCurrentPath);
+
 		bool Empty() const { return m_tracks.empty(); }
 		int  Count() const { return static_cast<int>(m_tracks.size()); }
 		int  CurrentIndex() const { return m_current; }

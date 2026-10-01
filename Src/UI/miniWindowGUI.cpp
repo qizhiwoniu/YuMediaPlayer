@@ -4,6 +4,9 @@
 #include "Core/AudioPlayer.h"
 #include <algorithm>
 #include <cmath>
+#include <mmdeviceapi.h>   // 静音：Core Audio（音频会话音量）
+#include <audioclient.h>
+#include <audiopolicy.h>
 
 namespace YuMediaPlayer
 {
@@ -764,7 +767,7 @@ namespace YuMediaPlayer
 		buttonInfo.previous.rect = previousRect;
 		buttonInfo.next.rect = nextRect;
 		DrawHeartButtonGdiplus(g, heartRect, buttonInfo.heart.hovered, buttonInfo.heart.active);
-		DrawSoundButtonGdiplus(g, soundRect, buttonInfo.sound.hovered);
+		DrawSoundButtonGdiplus(g, soundRect, buttonInfo.sound.hovered, buttonInfo.sound.active);
 		DrawListButtonGdiplus(g, listRect, buttonInfo.list.hovered);
 		DrawCloseButtonGdiplus(g, closeRect, buttonInfo.close.hovered);
 		DrawMiniButtonGdiplus(g, miniRect, buttonInfo.mini.hovered);
@@ -836,57 +839,59 @@ namespace YuMediaPlayer
 			boxHeight
 		);
 	}
-	void DrawSoundButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered)
+	void DrawSoundButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered, bool muted)
 	{
-		const float x = vRect.X;
-		const float y = vRect.Y;
-		const float w = vRect.Width;
-		const float h = vRect.Height;
+		// 网易云音乐风格的音量图标：圆角喇叭（小方块 + 向外张开的喇叭口）+ 两道弧形音波。
+		// 静音时不画音波，改画一个 ×。全部用 GDI+ 矢量绘制，不需要任何 SVG / 图片资源。
+		const Gdiplus::Color iconColor = hovered
+			? Gdiplus::Color(255, 255, 255, 255)   // 悬停时：白色
+			: Gdiplus::Color(235, 235, 235, 235);  // 正常时：浅灰色
+		Gdiplus::SolidBrush iconBrush(iconColor);
 
-		// 根据悬停状态选择颜色
-		Gdiplus::SolidBrush iconBrush(
-			hovered
-			? Gdiplus::Color(255, 255, 255, 255)  // 悬停时：白色
-			: Gdiplus::Color(235, 235, 235, 235)  // 正常时：浅灰色
-		);
+		// 用同色的圆角描边把喇叭的尖角磨圆
+		Gdiplus::Pen strokePen(iconColor, 1.6f);
+		strokePen.SetLineJoin(Gdiplus::LineJoinRound);
+		strokePen.SetStartCap(Gdiplus::LineCapRound);
+		strokePen.SetEndCap(Gdiplus::LineCapRound);
 
-		// 喇叭图标尺寸（放大一些，配合外层容器变大）
-		const float speakerWidth = 8.0f;
-		const float speakerHeight = 11.0f;
-		const float waveWidth = 4.0f;
+		const Gdiplus::SmoothingMode oldMode = g.GetSmoothingMode();
+		g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 
-		const float centerX = x + w / 2.0f;
-		const float centerY = y + h / 2.0f;
+		// 整个图形（喇叭 + 音波）水平范围约 -7.8 ~ +8.9，中心偏右 0.55，这里左移一点让它视觉居中
+		const float cx = vRect.X + vRect.Width / 2.0f - 0.6f;
+		const float cy = vRect.Y + vRect.Height / 2.0f;
 
-		// 绘制喇叭主体（三角形）
-		Gdiplus::PointF speakerPoints[3];
-		speakerPoints[0] = Gdiplus::PointF(centerX - speakerWidth / 2.0f, centerY - speakerHeight / 2.0f);
-		speakerPoints[1] = Gdiplus::PointF(centerX - speakerWidth / 2.0f, centerY + speakerHeight / 2.0f);
-		speakerPoints[2] = Gdiplus::PointF(centerX + speakerWidth / 2.0f, centerY);
+		// 喇叭主体：左边小方块 + 右边向外张开的喇叭口
+		const Gdiplus::PointF speaker[6] = {
+			Gdiplus::PointF(cx - 7.0f, cy - 2.6f),
+			Gdiplus::PointF(cx - 3.6f, cy - 2.6f),
+			Gdiplus::PointF(cx + 0.4f, cy - 6.2f),
+			Gdiplus::PointF(cx + 0.4f, cy + 6.2f),
+			Gdiplus::PointF(cx - 3.6f, cy + 2.6f),
+			Gdiplus::PointF(cx - 7.0f, cy + 2.6f)
+		};
+		g.FillPolygon(&iconBrush, speaker, 6);
+		g.DrawPolygon(&strokePen, speaker, 6);
 
-		g.FillPolygon(&iconBrush, speakerPoints, 3);
+		if (muted)
+		{
+			// 静音：喇叭右边画 ×
+			const float xc = cx + 6.0f;
+			const float r = 2.8f;
+			g.DrawLine(&strokePen, xc - r, cy - r, xc + r, cy + r);
+			g.DrawLine(&strokePen, xc - r, cy + r, xc + r, cy - r);
+		}
+		else
+		{
+			// 两道音波：圆心在喇叭口中线上，只画正右方 ±48° 的一段弧
+			const float waveCx = cx + 0.4f;
+			const float r1 = 4.5f;
+			const float r2 = 8.5f;
+			g.DrawArc(&strokePen, waveCx - r1, cy - r1, r1 * 2.0f, r1 * 2.0f, -48.0f, 96.0f);
+			g.DrawArc(&strokePen, waveCx - r2, cy - r2, r2 * 2.0f, r2 * 2.0f, -48.0f, 96.0f);
+		}
 
-		// 绘制音波纹（可选，表示有声音）
-		Gdiplus::Pen wavePen(&iconBrush, 1.0f);
-		const float waveRadius1 = speakerWidth / 2.0f + 2.0f;
-		const float waveRadius2 = speakerWidth / 2.0f + 4.0f;
-
-		// 第一道音波
-		g.DrawArc(&wavePen,
-			centerX + speakerWidth / 2.0f - waveRadius1,
-			centerY - waveRadius1,
-			waveRadius1 * 2.0f,
-			waveRadius1 * 2.0f,
-			-45.0f, 90.0f);
-
-		// 第二道音波
-		g.DrawArc(&wavePen,
-			centerX + speakerWidth / 2.0f - waveRadius2,
-			centerY - waveRadius2,
-			waveRadius2 * 2.0f,
-			waveRadius2 * 2.0f,
-			-45.0f, 90.0f);
-
+		g.SetSmoothingMode(oldMode);
 	}
 	void DrawListButtonGdiplus(Gdiplus::Graphics& g, const Gdiplus::RectF& vRect, bool hovered)
 	{
@@ -1053,38 +1058,91 @@ namespace YuMediaPlayer
 		Composite();
 		*/
 	}
+	namespace
+	{
+		bool s_soundMuted = false;   // 界面上显示用的静音状态
+
+		// 本线程如果还没初始化 COM 就临时初始化一下，用完对称释放
+		struct ScopedCom
+		{
+			HRESULT hr;
+			ScopedCom() : hr(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)) {}
+			~ScopedCom() { if (SUCCEEDED(hr)) CoUninitialize(); }   // S_OK / S_FALSE 都要配对释放；RPC_E_CHANGED_MODE 不用
+		};
+
+		// 取得本进程默认音频会话的 ISimpleAudioVolume（只影响本程序的声音，
+		// 不动系统主音量）。用完要 Release。失败返回 nullptr。
+		ISimpleAudioVolume* AcquireSessionVolume()
+		{
+			IMMDeviceEnumerator* enumerator = nullptr;
+			if (FAILED(CoCreateInstance(__uuidof(MMDeviceEnumerator), nullptr, CLSCTX_ALL,
+				__uuidof(IMMDeviceEnumerator), reinterpret_cast<void**>(&enumerator))))
+				return nullptr;
+
+			IMMDevice* device = nullptr;
+			HRESULT hr = enumerator->GetDefaultAudioEndpoint(eRender, eMultimedia, &device);
+			enumerator->Release();
+			if (FAILED(hr) || !device)
+				return nullptr;
+
+			IAudioSessionManager* manager = nullptr;
+			hr = device->Activate(__uuidof(IAudioSessionManager), CLSCTX_ALL, nullptr,
+				reinterpret_cast<void**>(&manager));
+			device->Release();
+			if (FAILED(hr) || !manager)
+				return nullptr;
+
+			ISimpleAudioVolume* volume = nullptr;
+			hr = manager->GetSimpleAudioVolume(nullptr, FALSE, &volume);   // nullptr = 本进程默认会话
+			manager->Release();
+			return SUCCEEDED(hr) ? volume : nullptr;
+		}
+	}
+
+	bool IsSoundMuted()
+	{
+		return s_soundMuted;
+	}
+
+	void SetSoundMuted(bool muted)
+	{
+		ScopedCom com;
+		ISimpleAudioVolume* volume = AcquireSessionVolume();
+		if (!volume)
+		{
+			OutputDebugStringW(L"[Volume] 取不到音频会话，静音设置失败\n");
+			return;
+		}
+		if (SUCCEEDED(volume->SetMute(muted ? TRUE : FALSE, nullptr)))
+			s_soundMuted = muted;
+		volume->Release();
+	}
+
 	void HandleSoundButtonClick(HWND hwnd)
 	{
-		OutputDebugStringW(L"[Button Click] Sound (Volume)\n");
-
-		// TODO: 实现音量控制功能
-		// 1. 显示音量滑块窗口
-		// 2. 或者在长按时拖动调整
-		// 3. 可以循环切换音量等级（静音 -> 低 -> 中 -> 高）
-
-		/*
-		示例实现：
-		// 显示音量菜单
-		ShowVolumeMenu(hwnd);
-
-		或者：
-
-		// 静音/取消静音
-		if (m_audioPlayer)
+		// 音量按钮：点一下静音，再点一下恢复。
+		// 以系统里本程序会话当前的真实静音状态为准来取反（用户在系统音量合成器里
+		// 改过也不会错位）；界面重绘由调用方（MainWindow 的 WM_LBUTTONUP）负责。
+		(void)hwnd;
+		ScopedCom com;
+		ISimpleAudioVolume* volume = AcquireSessionVolume();
+		if (!volume)
 		{
-			float currentVolume = m_audioPlayer->GetVolume();
-			if (currentVolume > 0.0f)
-			{
-				m_audioPlayer->SetVolume(0.0f);
-				OutputDebugStringW(L"[Volume] Muted\n");
-			}
-			else
-			{
-				m_audioPlayer->SetVolume(0.7f);
-				OutputDebugStringW(L"[Volume] Unmuted\n");
-			}
+			OutputDebugStringW(L"[Volume] 取不到音频会话，静音切换失败\n");
+			return;
 		}
-		*/
+
+		BOOL nowMuted = FALSE;
+		if (FAILED(volume->GetMute(&nowMuted)))
+			nowMuted = s_soundMuted ? TRUE : FALSE;
+
+		const BOOL target = nowMuted ? FALSE : TRUE;
+		if (SUCCEEDED(volume->SetMute(target, nullptr)))
+		{
+			s_soundMuted = (target == TRUE);
+			OutputDebugStringW(s_soundMuted ? L"[Volume] Muted\n" : L"[Volume] Unmuted\n");
+		}
+		volume->Release();
 	}
 	void HandleListButtonClick(HWND hwnd)
 	{
@@ -1171,6 +1229,7 @@ namespace YuMediaPlayer
 		}
 
 		OutputDebugStringW(L"Audio player initialized successfully\n");
+		SetSoundMuted(false);   // 上次退出时若还静音着，启动时复位，保证界面图标和实际一致
 		return true;
 	}
 
@@ -1178,6 +1237,7 @@ namespace YuMediaPlayer
 	{
 		if (g_audioPlayer != nullptr)
 		{
+			SetSoundMuted(false);   // 退出前取消静音，别把静音状态留在系统音量合成器里
 			delete g_audioPlayer;
 			g_audioPlayer = nullptr;
 		}
@@ -1263,6 +1323,10 @@ namespace YuMediaPlayer
 		// 圆形头像菜单项文字
 		constexpr wchar_t kAvatarRotateText[] = L"旋转";
 		constexpr wchar_t kAvatarStopText[] = L"停止（复位）";
+		constexpr wchar_t kAvatarRingYellowText[] = L"进度条：黄色";
+		constexpr wchar_t kAvatarRingRainbowText[] = L"进度条：七彩";
+
+		bool s_ringRainbow = false;            // 进度条皮肤：false = 黄色（默认），true = 七彩
 
 		// 封面旋转速度：每秒转多少度。36 度/秒 = 10 秒一圈，跟 QQ 音乐 / 网易云差不多的悠闲节奏。
 		// 想转快一点就调大这个数。
@@ -1302,6 +1366,11 @@ namespace YuMediaPlayer
 		}
 	}
 
+	bool IsRainbowRing()
+	{
+		return s_ringRainbow;
+	}
+
 	// 显示圆形头像的右键菜单
 	int ShowAvatarContextMenu(HWND hwnd, POINT pt)
 	{
@@ -1316,6 +1385,15 @@ namespace YuMediaPlayer
 		AppendMenuW(hMenu, MF_OWNERDRAW | (!s_isRotating ? MF_CHECKED : 0),
 			ContextMenuCommand::AvatarStop,
 			reinterpret_cast<LPCWSTR>(kAvatarStopText));
+
+		// 进度条皮肤：当前使用的那一项打勾
+		AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+		AppendMenuW(hMenu, MF_OWNERDRAW | (!s_ringRainbow ? MF_CHECKED : 0),
+			ContextMenuCommand::AvatarRingYellow,
+			reinterpret_cast<LPCWSTR>(kAvatarRingYellowText));
+		AppendMenuW(hMenu, MF_OWNERDRAW | (s_ringRainbow ? MF_CHECKED : 0),
+			ContextMenuCommand::AvatarRingRainbow,
+			reinterpret_cast<LPCWSTR>(kAvatarRingRainbowText));
 
 		// 设置菜单背景
 		MENUINFO menuInfo = { sizeof(MENUINFO) };
@@ -1343,6 +1421,12 @@ namespace YuMediaPlayer
 			break;
 		case ContextMenuCommand::AvatarStop:
 			StopAvatarRotation(hwnd);
+			break;
+		case ContextMenuCommand::AvatarRingYellow:
+			s_ringRainbow = false;   // 只记状态；真正换皮肤由 MainWindow 完成（它持有 CircularAvatar）
+			break;
+		case ContextMenuCommand::AvatarRingRainbow:
+			s_ringRainbow = true;
 			break;
 		default:
 			break;

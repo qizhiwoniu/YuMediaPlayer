@@ -3,7 +3,7 @@
 ; Non-commercial use only
 
 #define MyAppName "Yu音乐"
-#define MyAppVersion "1.0.0.2"
+#define MyAppVersion "1.1.0.3"
 #define MyAppPublisher "余鹏"
 #define MyAppURL "https://github.com/qizhiwoniu"
 #define MyAppExeName "YuMeidaPlayer.exe"
@@ -70,8 +70,10 @@ Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescrip
 //Source: "C:\Users\Administrator\Desktop\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "D:\visualstudio\YuMediaPlayer\fengbao\disk\*"; DestDir: "{app}\disk"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "D:\visualstudio\YuMediaPlayer\fengbao\song\*"; DestDir: "{app}\song"; Flags: ignoreversion recursesubdirs createallsubdirs
-Source: "D:\visualstudio\YuMediaPlayer\fengbao\YuMediaPlayer.exe"; DestDir: "{app}";  
-Source: "C:\Users\Administrator\Documents\License\*"; DestDir: "{app}\programm"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "D:\visualstudio\YuMediaPlayer\fengbao\ui\*"; DestDir: "{app}\ui"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "D:\visualstudio\YuMediaPlayer\fengbao\userprofile\*"; DestDir: "{app}\userprofile"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "D:\visualstudio\YuMediaPlayer\out\build\x64-Debug\YuMediaPlayer\YuMediaPlayer.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "C:\Users\Administrator\Documents\License\*"; DestDir: "{app}\License"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "D:\visualstudio\YuMediaPlayer\fengbao\*"; DestDir: "{app}\programm"; Flags: ignoreversion recursesubdirs createallsubdirs
 ; NOTE: Don't use "Flags: ignoreversion" on any shared system files
 [Registry]

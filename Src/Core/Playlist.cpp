@@ -218,6 +218,30 @@ namespace YuMediaPlayer
 		return Count();
 	}
 
+	bool Playlist::ReplaceAll(std::vector<Track> tracks, const std::wstring& keepCurrentPath)
+	{
+		m_tracks = std::move(tracks);
+		m_history.clear();
+		m_current = 0;
+
+		if (m_rngState == 0)
+			m_rngState = (GetTickCount() ^ (GetCurrentProcessId() << 16)) | 1u;
+
+		if (keepCurrentPath.empty())
+			return false;
+
+		const std::wstring key = ToLower(ToFullPath(keepCurrentPath));
+		for (size_t i = 0; i < m_tracks.size(); ++i)
+		{
+			if (ToLower(ToFullPath(m_tracks[i].audioPath)) == key)
+			{
+				m_current = static_cast<int>(i);
+				return true;
+			}
+		}
+		return false;
+	}
+
 	// ---------------------------------------------------------------
 	// 当前曲目 / 上一首 / 下一首
 	// ---------------------------------------------------------------

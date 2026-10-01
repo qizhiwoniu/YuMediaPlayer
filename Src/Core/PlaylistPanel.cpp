@@ -1,4 +1,4 @@
-#include "Core/PlaylistPanel.h"
+﻿#include "Core/PlaylistPanel.h"
 #include <string>
 
 // 注意：这里不能定义 NOMINMAX——GDI+ 的头文件依赖 min/max 宏。
@@ -19,6 +19,8 @@ namespace YuMediaPlayer
 		                                          // 卡片底边距窗口底 10px，这样卡片和面板之间留 4px 缝
 		constexpr float kWindowBottomMargin = 10.0f; // 面板底边距窗口底边（跟卡片一致）
 		constexpr float kScrollBarW = 8.0f;       // 需要滚动条时，给它留的宽度
+		constexpr float kAboveTopMargin = 10.0f;  // 向上弹出：面板顶边距窗口顶边（跟卡片左右留白一致）
+		constexpr float kAboveGap = 4.0f;         // 向上弹出：面板底边与播放器本体顶边（头像顶）之间的缝
 
 		const Color kPanelColor(255, 40, 40, 40);
 		const Color kHoverColor(255, 58, 58, 58);
@@ -34,7 +36,7 @@ namespace YuMediaPlayer
 			int   visibleRows = 0;
 		};
 
-		Layout MakeLayout(float winW, float baseH, int count)
+		Layout MakeLayout(float winW, float baseH, int count, bool above)
 		{
 			Layout L;
 			L.count = count;
@@ -44,7 +46,10 @@ namespace YuMediaPlayer
 			const int rowsForHeight = L.visibleRows > 0 ? L.visibleRows : 1;
 			const float inner = kHeaderH + rowsForHeight * kRowH + kPadBottom;
 
-			L.panel = RectF(10.0f, baseH - kPanelOverlap, winW - 20.0f, inner);
+			if (above)
+				L.panel = RectF(10.0f, kAboveTopMargin, winW - 20.0f, inner);
+			else
+				L.panel = RectF(10.0f, baseH - kPanelOverlap, winW - 20.0f, inner);
 			L.rowsArea = RectF(L.panel.X + kSidePad, L.panel.Y + kHeaderH,
 				L.panel.Width - kSidePad * 2.0f, rowsForHeight * kRowH);
 			return L;
@@ -61,9 +66,10 @@ namespace YuMediaPlayer
 		}
 	}
 
-	void PlaylistPanel::SetOpen(bool open)
+	void PlaylistPanel::SetOpen(bool open, bool above)
 	{
 		m_open = open;
+		m_above = open ? above : false;
 		if (!open)
 			m_hoverTrack = -1;
 	}
@@ -73,6 +79,8 @@ namespace YuMediaPlayer
 		const int visible = trackCount < kMaxVisibleRows ? trackCount : kMaxVisibleRows;
 		const int rowsForHeight = visible > 0 ? visible : 1;
 		const float inner = kHeaderH + rowsForHeight * kRowH + kPadBottom;
+		if (m_above)   // 窗口顶边 -> 顶部留白 -> 面板 -> 小缝 -> 播放器本体
+			return static_cast<int>(kAboveTopMargin + inner + kAboveGap);
 		// 窗口底边 = 面板底边 + 底部留白 = (baseH - overlap + inner) + margin
 		return static_cast<int>(inner - kPanelOverlap + kWindowBottomMargin);
 	}
@@ -83,7 +91,7 @@ namespace YuMediaPlayer
 			return;
 
 		const int count = playlist.Count();
-		const Layout L = MakeLayout(winW, baseH, count);
+		const Layout L = MakeLayout(winW, baseH, count, m_above);
 
 		// 背景
 		{
@@ -210,7 +218,7 @@ namespace YuMediaPlayer
 		if (!m_open || playlist.Count() == 0)
 			return -1;
 
-		const Layout L = MakeLayout(winW, baseH, playlist.Count());
+		const Layout L = MakeLayout(winW, baseH, playlist.Count(), m_above);
 		const RectF rows(L.rowsArea.X, L.rowsArea.Y, L.rowsArea.Width, L.visibleRows * kRowH);
 		if (!rows.Contains(static_cast<REAL>(pt.x), static_cast<REAL>(pt.y)))
 			return -1;
