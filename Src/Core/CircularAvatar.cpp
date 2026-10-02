@@ -115,7 +115,7 @@ namespace
     // 而不是整条弧一起变色。
     // 做法：切成每段 3° 的小弧，各画各的颜色（相邻段多叠 1° 避免出现缝），
     // 两端再补一个圆头，跟单色进度环的圆角效果保持一致。
-    void DrawRainbowArc(Graphics& g, const RectF& arcRect, float thickness, float sweep)
+    void DrawRainbowArc(Graphics& g, const RectF& arcRect, float thickness, float sweep, float colorOffsetDeg)
     {
         const float kStep = 3.0f;
         const float kOverlap = 1.0f;
@@ -128,7 +128,7 @@ namespace
             const float segSweep = end - a;
             if (segSweep <= 0.0f)
                 break;
-            pen.SetColor(RainbowColorAt(a + segSweep / 2.0f));
+            pen.SetColor(RainbowColorAt(a + segSweep / 2.0f + colorOffsetDeg));
             g.DrawArc(&pen, arcRect, -90.0f + a, segSweep);
         }
 
@@ -138,7 +138,7 @@ namespace
         auto capAt = [&](float angle)
         {
             const float rad = (-90.0f + angle) * kPi / 180.0f;
-            SolidBrush brush(RainbowColorAt(angle));
+            SolidBrush brush(RainbowColorAt(angle + colorOffsetDeg));
             g.FillEllipse(&brush,
                 cx + radius * std::cos(rad) - thickness / 2.0f,
                 cy + radius * std::sin(rad) - thickness / 2.0f,
@@ -289,7 +289,10 @@ void CircularAvatar::Draw(Gdiplus::Graphics& graphics, const Gdiplus::RectF& rec
             float sweep = 360.0f * m_progress;
             if (m_skin.rainbowProgress)
             {
-                DrawRainbowArc(graphics, arcRect, ringThickness, sweep);
+                // 七彩颜色沿圆环持续旋转
+                const float rainbowOffset =
+                    std::fmod(GetTickCount() * 0.3f, 360.0f);
+                DrawRainbowArc(graphics, arcRect, ringThickness, sweep, rainbowOffset);
             }
             else
             {

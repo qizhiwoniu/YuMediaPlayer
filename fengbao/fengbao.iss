@@ -3,7 +3,7 @@
 ; Non-commercial use only
 
 #define MyAppName "Yu音乐"
-#define MyAppVersion "1.1.0.3"
+#define MyAppVersion "1.1.0.4"
 #define MyAppPublisher "余鹏"
 #define MyAppURL "https://github.com/qizhiwoniu"
 #define MyAppExeName "YuMeidaPlayer.exe"
@@ -53,8 +53,8 @@ Name: "chinesesimplified"; MessagesFile: "compiler:Languages\ChineseSimplified.i
 Name: "japanese"; MessagesFile: "compiler:Languages\Japanese.isl"
 Name: "russian"; MessagesFile: "compiler:Languages\Russian.isl"
 [Types]
-Name: custom; Description: custom install; Flags: iscustom
 Name: full; Description:full install; 
+Name: custom; Description: custom install; Flags: iscustom
 Name: compact; Description:compact install; 
 [Components]
 Name: "main"; Description: "Main Files"; Types: full compact
