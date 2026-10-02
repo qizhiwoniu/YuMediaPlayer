@@ -43,7 +43,14 @@ namespace YuMediaPlayer
 		void DrawPlayBar(HDC hdc, const RECT& rect);
 		void SetPlaying(bool playing);
 		void SetLoopMode(int mode);   // 传 0/1/2，内部也会自动取模
-		void SetVolume(float volume); // 0.0 ~ 1.0
+		void SetVolume(float volume); // 0.0 ~ 1.0（只更新界面，不触发音量回调）
+		// 用户拖动播放栏上的音量波浪线/圆点时回调，参数 0.0 ~ 1.0（拖动中会连续触发）
+		void SetVolumeCallback(std::function<void(float)> callback);
+		bool IsVolumeDragging() const { return m_volDragging; }
+		// 点击播放栏上的"循环模式"按钮时回调（外部在这里切换到下一个循环模式，再调用 SetLoopMode 刷新图标）
+		void SetLoopCallback(std::function<void()> callback);
+		// 播放栏左侧的封面图（所有权交给窗口；传 nullptr 清空，回到灰色占位）
+		void SetNowPlayingCover(std::unique_ptr<Gdiplus::Image> cover);
 		void SetProgress(int currentSeconds, int totalSeconds);
 		void SetNowPlaying(const wchar_t* title, const wchar_t* artist);
 		// 告诉主窗口"迷你窗口是哪个"，关闭主窗口时用它把迷你窗口恢复显示
@@ -68,7 +75,12 @@ namespace YuMediaPlayer
 		// 设置各页面的歌曲列表（会重置该页滚动位置）
 		void SetOnlineTracks(std::vector<TrackItem> tracks);
 		void SetLocalTracks(std::vector<TrackItem> tracks);
+		// 喜欢页：和另外两页不同，更新时保留当前滚动位置（取消喜欢后行消失，列表不会跳回顶部）
 		void SetFavoriteTracks(std::vector<TrackItem> tracks);
+		// 取某页某行的歌曲，越界返回 nullptr（指针只在下次修改列表前有效）
+		const TrackItem* GetTrack(int page, int row) const;
+		// 按路径把所有页里同一首歌的爱心标记同步成 favorite（不重置滚动/选中）
+		void SetTrackFavorite(const std::wstring& path, bool favorite);
 		// 乐馆分类标签，默认已经有一组（推荐/流行/国语...）
 		void SetCategories(std::vector<std::wstring> categories);
 		// 用户在搜索框按回车或点放大镜时回调，参数是搜索框里的文字
@@ -93,6 +105,7 @@ namespace YuMediaPlayer
 
 	private:
 		float SeekRatioFromX(int x) const;    // 鼠标 x -> 进度条比例 [0,1]
+		float VolumeFromX(int x) const;       // 鼠标 x -> 音量比例 [0,1]
 		static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 		LRESULT EventProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 		bool LoadSettingsIcon(const wchar_t* imagePath);
@@ -188,6 +201,16 @@ namespace YuMediaPlayer
 		std::function<void()> m_onPlayPause;
 		std::function<void(float)> m_onSeek;
 		bool m_seeking = false;
+
+		// 音量：波浪线 + 圆点（DrawPlayBar 里画，同时算出命中区域）
+		RECT m_volumeSliderRect{};
+		bool m_volDragging = false;
+		std::function<void(float)> m_onVolume;
+		std::function<void()> m_onLoop;
+
+		// 播放栏封面（GDI+ 图像，必须在 GdiplusShutdown 之前释放）
+		std::unique_ptr<Gdiplus::Image> m_coverImage;
+
 		std::unique_ptr<SettingPage> m_settingPage;
 	};
 }

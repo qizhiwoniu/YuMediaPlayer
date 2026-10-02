@@ -24,6 +24,9 @@ namespace YuMediaPlayer
 			L".mp3", L".flac", L".m4a", L".aac", L".wma"
 		};
 
+		// 时长短于这个秒数的当作音效/提示音，不进入歌曲列表（读不到时长的文件不受影响）
+		const int kMinTrackSeconds = 60;
+
 		// Windows 属性系统的几个键（自己定义，免得链接 PKEY_* 的符号）
 		const PROPERTYKEY kKeyTitle = { { 0xF29F85E0, 0x4FF9, 0x1068, { 0xAB, 0x91, 0x08, 0x00, 0x2B, 0x27, 0xB3, 0xD9 } }, 2 };   // System.Title
 		const PROPERTYKEY kKeyArtist = { { 0x56A3372E, 0xCE9C, 0x11D2, { 0x9F, 0x0E, 0x00, 0x60, 0x97, 0xC6, 0x86, 0xF6 } }, 2 };  // System.Music.Artist
@@ -251,6 +254,8 @@ namespace YuMediaPlayer
 			std::wstring title, artist, album;
 			int seconds = 0;
 			ReadTags(t.path, title, artist, album, seconds);
+			if (seconds > 0 && seconds < kMinTrackSeconds)
+				continue;       // 少于 1 分钟：音效，跳过
 			if (title.empty())
 				TitleFromFileName(t.path, title, artist);
 			t.title = title;

@@ -1,4 +1,5 @@
 #include "SettingPage.h"
+#include "Theme.h"   // UITheme：设置页改主题后，主窗口/迷你窗口跟着变
 #include <shlobj.h>
 #include <math.h>
 #include <wchar.h>
@@ -578,6 +579,7 @@ namespace YuMediaPlayer
 		m_lastAutoStart = m_settings.startWithWindows;
 
 		m_settings.Clamp();
+		UITheme::SetMode(m_settings.theme);
 		RebuildIfLanguageChanged();
 		if (m_hwnd)
 			InvalidateRect(m_hwnd, nullptr, FALSE);
@@ -615,6 +617,7 @@ namespace YuMediaPlayer
 	{
 		m_settings = settings;
 		m_settings.Clamp();
+		UITheme::SetMode(m_settings.theme);
 		m_lastMusicFolder = m_settings.musicFolder;   // 代码里设置的不触发回调
 		RebuildIfLanguageChanged();
 		if (m_settings.startWithWindows != m_lastAutoStart)
@@ -1167,6 +1170,7 @@ namespace YuMediaPlayer
 			if (m_onMusicFolder)
 				m_onMusicFolder(m_lastMusicFolder);
 		}
+		UITheme::SetMode(m_settings.theme);   // 主题变了：主窗口、迷你窗口、设置页一起重绘
 		if (m_onChanged)
 			m_onChanged(m_settings);
 		if (m_hwnd)
