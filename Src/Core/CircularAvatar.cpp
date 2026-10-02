@@ -57,7 +57,7 @@ namespace
         if (s_logo)
             return s_logo;
 
-        const std::wstring kRelativeLogo = L"Assets\\ui\\mini\\MicLogo.png";
+        const std::wstring kRelativeLogo = L"ui\\mini\\MicLogo.png";
 
         std::vector<std::wstring> candidates;
 
