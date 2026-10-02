@@ -19,13 +19,13 @@ namespace YuMediaPlayer
 		std::wstring fontName;         // 界面字体名，空=默认（微软雅黑）
 		// ---- 播放 ----
 		int  loopMode = 0;              // 0=列表循环 1=单曲循环 2=随机播放 3=心动循环（和 WindowGUI::SetLoopMode 一致）
-		int  volume = 70;               // 默认音量 0~100
+		int  volume = 50;               // 默认音量 0~100
 		int  fadeSeconds = 0;           // 切歌淡入淡出时长（秒），0=关闭
 		bool autoPlayOnStart = false;   // 启动后自动播放
 		bool resumeLastTrack = true;    // 启动时恢复上次播放的歌曲
 
 		// ---- 界面 ----
-		int  cornerRadius = 15;         // 主窗口圆角半径 0~30
+		int  cornerRadius = 13;         // 主窗口圆角半径 0~30
 		bool alwaysOnTop = true;        // 主窗口置顶
 
 		// ---- 系统 ----

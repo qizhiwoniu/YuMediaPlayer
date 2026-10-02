@@ -1,6 +1,8 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <memory>
+#include <cmath>
+#include <vector>
 #include <dwmapi.h>
 #include <gdiplus.h>
 #include "Core/Theme.h"
@@ -29,13 +31,31 @@ namespace YuMediaPlayer
 			path.AddArc(rect.X, rect.Y + rect.Height - d, d, d, 90, 90);
 			path.CloseFigure();
 		}
+		// ---- 主题：0=深色 1=浅色（由设置页写入 UITheme，改了会自动重绘）----
+		// 灰度色：深色主题用 dark，浅色主题用 light
+		Gdiplus::Color ThemeGray(int dark, int light, int alpha = 255)
+		{
+			int v = UITheme::IsLight() ? light : dark;
+			return Gdiplus::Color((BYTE)alpha, (BYTE)v, (BYTE)v, (BYTE)v);
+		}
+		COLORREF ThemeRef(int dark, int light)
+		{
+			int v = UITheme::IsLight() ? light : dark;
+			return RGB(v, v, v);
+		}
+		// 强调色：深色=亮黄，浅色=琥珀色（亮黄在浅色背景上看不清）
+		Gdiplus::Color ThemeAccent()
+		{
+			return UITheme::IsLight() ? Gdiplus::Color(255, 184, 128, 0) : Gdiplus::Color(255, 255, 204, 0);
+		}
+
 		// 圆形播放/暂停按钮：浅色圆底 + 深色三角形/暂停条
 		void DrawPlayPauseGlyph(Gdiplus::Graphics& g, float cx, float cy, float radius, bool isPlaying)
 		{
-			Gdiplus::SolidBrush circleBrush(Gdiplus::Color(255, 235, 235, 235));
+			Gdiplus::SolidBrush circleBrush(ThemeGray(235, 40));
 			g.FillEllipse(&circleBrush, cx - radius, cy - radius, radius * 2, radius * 2);
 
-			Gdiplus::SolidBrush glyphBrush(Gdiplus::Color(255, 28, 28, 28));
+			Gdiplus::SolidBrush glyphBrush(ThemeGray(28, 245));
 
 			if (isPlaying)
 			{
@@ -358,6 +378,7 @@ namespace YuMediaPlayer
 	WindowGUI::~WindowGUI()
 	{
 		m_settingPage.reset();   // 先销毁设置页（它自己有一份 GDI+ 引用）
+		m_coverImage.reset();    // GDI+ 图像必须在 GdiplusShutdown 之前释放
 		if (g_windowGUIInstance == this)
 			g_windowGUIInstance = nullptr;
 		if (m_logoIcon)
@@ -528,9 +549,9 @@ namespace YuMediaPlayer
 	void WindowGUI::DrawButton(HDC hdc, const RECT& rect, bool hovered, int btnType)
 	{
 		// 按钮背景色
-		COLORREF bgColor = hovered ? RGB(70, 70, 70) : RGB(40, 40, 40);
-		COLORREF borderColor = hovered ? RGB(100, 100, 100) : RGB(60, 60, 60);
-		COLORREF iconColor = hovered ? RGB(255, 255, 255) : RGB(200, 200, 200);
+		COLORREF bgColor = hovered ? ThemeRef(70, 214) : ThemeRef(40, 232);
+		COLORREF borderColor = hovered ? ThemeRef(100, 176) : ThemeRef(60, 208);
+		COLORREF iconColor = hovered ? ThemeRef(255, 20) : ThemeRef(200, 90);
 
 		// 绘制背景
 		HBRUSH hBgBrush = CreateSolidBrush(bgColor);
@@ -599,7 +620,11 @@ namespace YuMediaPlayer
 				int displaySize = 20;
 				int iconX = centerX - displaySize / 2;
 				int iconY = centerY - displaySize / 2;
-				graphics.DrawImage(m_settingsIcon, iconX, iconY, displaySize, displaySize);
+				if (UITheme::IsLight())   // 图标是白色的，浅色主题下染成深灰
+					DrawTintedIcon(graphics, m_settingsIcon, Gdiplus::RectF((float)iconX, (float)iconY, (float)displaySize, (float)displaySize),
+						hovered ? Gdiplus::Color(255, 20, 20, 20) : Gdiplus::Color(255, 90, 90, 90));
+				else
+					graphics.DrawImage(m_settingsIcon, iconX, iconY, displaySize, displaySize);
 				iconDrawn = true;
 				}
 				catch (...)
@@ -625,7 +650,11 @@ namespace YuMediaPlayer
 					int displaySize = 20;
 					int iconX = centerX - displaySize / 2;
 					int iconY = centerY - displaySize / 2;
-					graphics.DrawImage(m_refreshIcon, iconX, iconY, displaySize, displaySize);
+					if (UITheme::IsLight())
+						DrawTintedIcon(graphics, m_refreshIcon, Gdiplus::RectF((float)iconX, (float)iconY, (float)displaySize, (float)displaySize),
+							hovered ? Gdiplus::Color(255, 20, 20, 20) : Gdiplus::Color(255, 90, 90, 90));
+					else
+						graphics.DrawImage(m_refreshIcon, iconX, iconY, displaySize, displaySize);
 					iconDrawn = true;
 				}
 				catch (...)
@@ -702,11 +731,11 @@ namespace YuMediaPlayer
 		BuildRoundRectPath(path, Gdiplus::Rect(rect.left, rect.top, w, h), radius);
 
 		// 背景比主窗口背景稍亮，形成一张"卡片"
-		Gdiplus::SolidBrush bgBrush(Gdiplus::Color(255, 32, 32, 32));
+		Gdiplus::SolidBrush bgBrush(ThemeGray(32, 255));
 		graphics.FillPath(&bgBrush, &path);
 
 		// 细描边，增加层次感
-		Gdiplus::Pen borderPen(Gdiplus::Color(255, 55, 55, 55), 1.0f);
+		Gdiplus::Pen borderPen(ThemeGray(55, 222), 1.0f);
 		graphics.DrawPath(&borderPen, &path);
 		//------------------------------
 		const int paddingX = 16;
@@ -723,9 +752,20 @@ namespace YuMediaPlayer
 
 		Gdiplus::GraphicsPath albumPath;
 		BuildRoundRectPath(albumPath, albumRect, 8);
-		Gdiplus::SolidBrush albumBrush(Gdiplus::Color(255, 60, 60, 60));
+		Gdiplus::SolidBrush albumBrush(ThemeGray(60, 226));
 		graphics.FillPath(&albumBrush, &albumPath);
-		// 以后接入真实封面时：graphics.DrawImage(coverImage, albumRect) 替换掉上面的占位填充即可
+		// 封面：有图就居中裁成正方形，画进圆角方块里；没有图就保留上面的灰色占位
+		if (m_coverImage && m_coverImage->GetWidth() > 0 && m_coverImage->GetHeight() > 0)
+		{
+			const INT iw = (INT)m_coverImage->GetWidth();
+			const INT ih = (INT)m_coverImage->GetHeight();
+			const INT side = iw < ih ? iw : ih;
+			graphics.SetClip(&albumPath);
+			graphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+			graphics.DrawImage(m_coverImage.get(), albumRect,
+				(iw - side) / 2, (ih - side) / 2, side, side, Gdiplus::UnitPixel);
+			graphics.ResetClip();
+		}
 		// ---- 播放控制区：循环模式 - 上一曲 - 播放/暂停 - 下一曲 - 音量 ----
 		//
 		int textLeft = albumRect.X + albumRect.Width + paddingX;
@@ -783,8 +823,8 @@ namespace YuMediaPlayer
 		Gdiplus::Font titleFont(&fontFamily, 15, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
 		Gdiplus::Font artistFont(&fontFamily, 12, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
 
-		Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 235, 235, 235));
-		Gdiplus::SolidBrush artistBrush(Gdiplus::Color(255, 160, 160, 160));
+		Gdiplus::SolidBrush titleBrush(ThemeGray(235, 30));
+		Gdiplus::SolidBrush artistBrush(ThemeGray(160, 115));
 
 		std::wstring title = m_nowPlayingTitle.empty() ? L"\u672A\u5728\u64AD\u653E" : m_nowPlayingTitle;
 		const std::wstring& artist = m_nowPlayingArtist;
@@ -806,8 +846,8 @@ namespace YuMediaPlayer
 		if (!artist.empty())
 			graphics.DrawString(artist.c_str(), -1, &artistFont, artistRect, &format, &artistBrush);
 		// ---- 画控制按钮 ----
-		Gdiplus::Color iconColor(255, 210, 210, 210);
-		Gdiplus::Color activeColor(255, 255, 255, 255);
+		Gdiplus::Color iconColor = ThemeGray(210, 85);
+		Gdiplus::Color activeColor = ThemeGray(255, 20);
 
 		DrawLoopGlyph(graphics, loopCx, centerY, sideSize, m_loopMode,
 			m_loopMode == 0 ? iconColor : activeColor); // 非默认模式时点亮显示
@@ -815,6 +855,60 @@ namespace YuMediaPlayer
 		DrawPlayPauseGlyph(graphics, centerX, centerY, playRadius, m_isPlaying);
 		DrawSkipGlyph(graphics, nextCx, centerY, skipSize, true, iconColor);
 		DrawVolumeGlyph(graphics, volumeCx, centerY, sideSize, m_volume, iconColor);
+		// ---- 音量：波浪线 + 圆点（拖动圆点调整音量）----
+		{
+			const float waveLeft = volumeCx + sideSize / 2.0f + 14.0f;
+			float waveRight = waveLeft + 120.0f;
+			const float maxRight = (float)(rect.right - paddingX);
+			if (waveRight > maxRight)
+				waveRight = maxRight;      // 窗口窄的时候缩短，太短就不画
+
+			if (waveRight - waveLeft >= 40.0f)
+			{
+				const float amp = 6.0f;        // 波幅（越大波浪越明显）
+				const float period = 45.0f;    // 波长
+				const float twoPi = 6.2831853f;
+				auto waveY = [&](float x) { return centerY + amp * sinf((x - waveLeft) * twoPi / period); };
+
+				const float dotX = waveLeft + (waveRight - waveLeft) * m_volume;
+
+				// 整条波浪（暗色）
+				std::vector<Gdiplus::PointF> all;
+				for (float x = waveLeft; x <= waveRight; x += 1.0f)
+					all.push_back(Gdiplus::PointF(x, waveY(x)));
+				// 圆点左侧（亮色，表示当前音量）
+				std::vector<Gdiplus::PointF> lit;
+				for (float x = waveLeft; x <= dotX; x += 1.0f)
+					lit.push_back(Gdiplus::PointF(x, waveY(x)));
+				lit.push_back(Gdiplus::PointF(dotX, waveY(dotX)));
+
+				Gdiplus::Pen dimPen(ThemeGray(75, 205), 2.5f);
+				dimPen.SetStartCap(Gdiplus::LineCapRound);
+				dimPen.SetEndCap(Gdiplus::LineCapRound);
+				dimPen.SetLineJoin(Gdiplus::LineJoinRound);
+				graphics.DrawLines(&dimPen, all.data(), (INT)all.size());
+
+				if (lit.size() >= 2)
+				{
+					Gdiplus::Pen litPen(ThemeGray(235, 60), 2.5f);
+					litPen.SetStartCap(Gdiplus::LineCapRound);
+					litPen.SetEndCap(Gdiplus::LineCapRound);
+					litPen.SetLineJoin(Gdiplus::LineJoinRound);
+					graphics.DrawLines(&litPen, lit.data(), (INT)lit.size());
+				}
+
+				const float dotR = (m_volDragging ? 7.5f : 6.5f);
+				Gdiplus::SolidBrush dotBrush(ThemeGray(255, 45));
+				graphics.FillEllipse(&dotBrush, dotX - dotR, waveY(dotX) - dotR, dotR * 2.0f, dotR * 2.0f);
+
+				m_volumeSliderRect = { (LONG)(waveLeft - 8), (LONG)(centerY - 18),
+									   (LONG)(waveRight + 8), (LONG)(centerY + 18) };
+			}
+			else
+			{
+				m_volumeSliderRect = {};
+			}
+		}
 		// ---- 进度条：00:00 ———●——— xx:xx:xx ----
 		{
 			const int timeLabelWidth = 44;  //
@@ -832,7 +926,7 @@ namespace YuMediaPlayer
 
 			Gdiplus::FontFamily timeFontFamily(L"Microsoft YaHei");
 			Gdiplus::Font timeFont(&timeFontFamily, 11, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-			Gdiplus::SolidBrush timeBrush(Gdiplus::Color(255, 170, 170, 170));
+			Gdiplus::SolidBrush timeBrush(ThemeGray(170, 120));
 
 			Gdiplus::StringFormat leftFormat;
 			leftFormat.SetAlignment(Gdiplus::StringAlignmentNear);
@@ -847,7 +941,7 @@ namespace YuMediaPlayer
 			graphics.DrawString(totalText.c_str(), -1, &timeFont, rightLabelRect, &rightFormat, &timeBrush);
 
 			// 细线滑轨：底色 + 已播放部分高亮
-			Gdiplus::Pen trackPen(Gdiplus::Color(255, 75, 75, 75), 3.0f);
+			Gdiplus::Pen trackPen(ThemeGray(75, 215), 3.0f);
 			trackPen.SetStartCap(Gdiplus::LineCapRound);
 			trackPen.SetEndCap(Gdiplus::LineCapRound);
 			graphics.DrawLine(&trackPen, trackLeft, trackY, trackRight, trackY);
@@ -862,14 +956,14 @@ namespace YuMediaPlayer
 
 			if (thumbX > trackLeft)
 			{
-				Gdiplus::Pen playedPen(Gdiplus::Color(255, 235, 235, 235), 3.0f);
+				Gdiplus::Pen playedPen(ThemeGray(235, 60), 3.0f);
 				playedPen.SetStartCap(Gdiplus::LineCapRound);
 				playedPen.SetEndCap(Gdiplus::LineCapRound);
 				graphics.DrawLine(&playedPen, trackLeft, trackY, thumbX, trackY);
 			}
 
 			// 可滑动的圆点
-			Gdiplus::SolidBrush thumbBrush(Gdiplus::Color(255, 255, 255, 255));
+			Gdiplus::SolidBrush thumbBrush(ThemeGray(255, 45));
 			graphics.FillEllipse(&thumbBrush, thumbX - thumbRadius, trackY - thumbRadius,
 				thumbRadius * 2.0f, thumbRadius * 2.0f);
 
@@ -907,6 +1001,28 @@ namespace YuMediaPlayer
 		if (m_hwnd)
 			InvalidateRect(m_hwnd, &m_playBarRect, FALSE);
 	}
+	void WindowGUI::SetVolumeCallback(std::function<void(float)> callback) { m_onVolume = std::move(callback); }
+	void WindowGUI::SetLoopCallback(std::function<void()> callback) { m_onLoop = std::move(callback); }
+
+	void WindowGUI::SetNowPlayingCover(std::unique_ptr<Gdiplus::Image> cover)
+	{
+		m_coverImage = std::move(cover);
+		if (m_hwnd)
+			InvalidateRect(m_hwnd, &m_playBarRect, FALSE);
+	}
+
+	float WindowGUI::VolumeFromX(int x) const
+	{
+		const int l = m_volumeSliderRect.left + 8;
+		const int r = m_volumeSliderRect.right - 8;
+		if (r <= l)
+			return m_volume;
+		float v = (float)(x - l) / (float)(r - l);
+		if (v < 0.0f) v = 0.0f;
+		if (v > 1.0f) v = 1.0f;
+		return v;
+	}
+
 	void WindowGUI::SetProgress(int currentSeconds, int totalSeconds)
 	{
 		if (m_seeking)
@@ -933,7 +1049,29 @@ namespace YuMediaPlayer
 	// 标题栏 logo 的显示尺寸和位置（想改大小/位置改这里）
 	static const int kLogoSize = 36;
 	static const int kLogoX = 55;
-	static const int kLogoY = 5;
+	static const int kLogoY = 5;   // （已不再使用：logo 现在跟着侧边栏一起布局，见 SidebarLogoY）
+
+	// 侧边栏里 "logo + 三个按钮" 作为一个整体，垂直放在侧边栏中间偏上的位置
+	static const int kLogoGap = 12;          // logo 与第一个按钮的间距
+	static const int kSbItemHeight = 42;
+	static const int kSbItemGap = 6;
+	static const int kSbItemCount = 3;       // 要和 kSidebarCount 保持一致
+	static const float kSbGroupRatio = 0.30f; // 0=贴顶 0.5=正中，越小越靠上
+
+	static int SidebarGroupTop(const RECT& sb)
+	{
+		const int groupH = kLogoSize + kLogoGap
+			+ kSbItemCount * kSbItemHeight + (kSbItemCount - 1) * kSbItemGap;
+		int spare = (sb.bottom - sb.top) - groupH;
+		if (spare < 0) spare = 0;                       // 窗口太矮时贴顶，不会跑出去
+		return sb.top + (int)(spare * kSbGroupRatio);
+	}
+	static const int kLogoLift = 95;        // logo 比按钮组再往上抬多少像素（按钮位置不受影响）
+	static int SidebarLogoY(const RECT& sb)
+	{
+		int y = SidebarGroupTop(sb) - kLogoLift;
+		return y < 0 ? 0 : y;
+	}
 
 	bool WindowGUI::LoadLogoIcon()
 	{
@@ -1003,8 +1141,8 @@ namespace YuMediaPlayer
 		const int topY = 40;           // 标题栏(30px)下方留一点空隙
 		const int gapToPlayBar = 10;   // 与底部播放栏的间距
 		const int padding = 8;
-		const int itemHeight = 42;
-		const int itemGap = 6;
+		const int itemHeight = kSbItemHeight;
+		const int itemGap = kSbItemGap;
 
 		m_sidebarRect = {
 			marginLeft,
@@ -1013,9 +1151,11 @@ namespace YuMediaPlayer
 			m_playBarRect.top - gapToPlayBar
 		};
 
+		// 按钮从 logo 下面开始排（整体已经下移到中间偏上）
+		const int itemsTop = SidebarGroupTop(m_sidebarRect) + kLogoSize + kLogoGap;
 		for (int i = 0; i < kSidebarCount; i++)
 		{
-			int y = m_sidebarRect.top + padding + i * (itemHeight + itemGap);
+			int y = itemsTop + i * (itemHeight + itemGap);
 			m_sidebarItemRects[i] = {
 				m_sidebarRect.left + padding,
 				y,
@@ -1042,11 +1182,11 @@ namespace YuMediaPlayer
 			L"\u4E50\u9986", L"\u672C\u5730", L"\u559C\u6B22"
 		};
 
-		const Gdiplus::Color accentColor(255, 255, 204, 0);     // 选中：黄色
-		const Gdiplus::Color normalColor(255, 200, 200, 200);  // 默认：浅灰
-		const Gdiplus::Color hoverColor(255, 255, 255, 255);   // 悬停：白
-		const Gdiplus::Color selectedBg(255, 46, 46, 46);
-		const Gdiplus::Color hoverBg(255, 36, 36, 36);
+		const Gdiplus::Color accentColor = ThemeAccent();     // 选中：黄色
+		const Gdiplus::Color normalColor = ThemeGray(200, 85);  // 默认：浅灰
+		const Gdiplus::Color hoverColor = ThemeGray(255, 20);   // 悬停：白
+		const Gdiplus::Color selectedBg = ThemeGray(46, 226);
+		const Gdiplus::Color hoverBg = ThemeGray(36, 234);
 		const int itemRadius = 10;
 		const float iconSize = 22.0f;
 		const float iconPadLeft = 16.0f;
@@ -1139,7 +1279,7 @@ namespace YuMediaPlayer
 			if (sw < 0) sw = 0;
 			m_searchRect = { left, y, left + sw, y + kSearchHeight };
 			m_searchIconRect = { left, y, left + (sw < 40 ? sw : 40), y + kSearchHeight };
-			y += kSearchHeight + 14;
+			y += kSearchHeight + 22;   // search box to category row gap
 
 			int x = left;
 			for (size_t i = 0; i < m_categories.size(); i++)
@@ -1182,18 +1322,18 @@ namespace YuMediaPlayer
 		g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
 		g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
 
-		const Gdiplus::Color accent(255, 255, 204, 0);
-		const Gdiplus::Color white(255, 240, 240, 240);
-		const Gdiplus::Color gray(255, 170, 170, 170);
-		const Gdiplus::Color dimGray(255, 130, 130, 130);
+		const Gdiplus::Color accent = ThemeAccent();
+		const Gdiplus::Color white = ThemeGray(240, 30);
+		const Gdiplus::Color gray = ThemeGray(170, 110);
+		const Gdiplus::Color dimGray = ThemeGray(130, 150);
 
 		// ---- 卡片底板（和播放栏同风格）----
 		{
 			Gdiplus::GraphicsPath path;
 			BuildRoundRectPath(path, Gdiplus::Rect(m_contentRect.left, m_contentRect.top, cw, ch), 16);
-			Gdiplus::SolidBrush bg(Gdiplus::Color(255, 32, 32, 32));
+			Gdiplus::SolidBrush bg(ThemeGray(32, 255));
 			g.FillPath(&bg, &path);
-			Gdiplus::Pen border(Gdiplus::Color(255, 55, 55, 55), 1.0f);
+			Gdiplus::Pen border(ThemeGray(55, 222), 1.0f);
 			g.DrawPath(&border, &path);
 		}
 
@@ -1237,15 +1377,15 @@ namespace YuMediaPlayer
 			if (sw > 0)
 			{
 				Gdiplus::GraphicsPath path;
-				BuildRoundRectPath(path, Gdiplus::Rect(sr.left, sr.top, sw, kSearchHeight), kSearchHeight / 2);
-				Gdiplus::SolidBrush pillBg(Gdiplus::Color(255, 44, 44, 44));
+				BuildRoundRectPath(path, Gdiplus::Rect(sr.left, sr.top, sw - 1, kSearchHeight - 1), (kSearchHeight - 1) / 2);   // inset 1px so the border stays inside the rect
+				Gdiplus::SolidBrush pillBg(ThemeGray(44, 238));
 				g.FillPath(&pillBg, &path);
-				Gdiplus::Pen pillBorder(m_searchFocused ? accent : Gdiplus::Color(255, 64, 64, 64), 1.0f);
+				Gdiplus::Pen pillBorder(m_searchFocused ? accent : ThemeGray(64, 208), 1.0f);
 				g.DrawPath(&pillBorder, &path);
 
 				float cx = sr.left + 20.0f;
 				float cy = sr.top + kSearchHeight / 2.0f;
-				Gdiplus::Pen iconPen(Gdiplus::Color(255, 170, 170, 170), 1.8f);
+				Gdiplus::Pen iconPen(ThemeGray(170, 120), 1.8f);
 				iconPen.SetLineCap(Gdiplus::LineCapRound, Gdiplus::LineCapRound, Gdiplus::DashCapRound);
 				g.DrawEllipse(&iconPen, cx - 7.0f, cy - 7.0f, 10.0f, 10.0f);
 				g.DrawLine(&iconPen, cx + 1.5f, cy + 1.5f, cx + 6.0f, cy + 6.0f);
@@ -1265,12 +1405,12 @@ namespace YuMediaPlayer
 
 				Gdiplus::GraphicsPath path;
 				BuildRoundRectPath(path, Gdiplus::Rect(r.left, r.top, w, h), h / 2);
-				Gdiplus::SolidBrush chipBg(selected ? accent
-					: (hovered ? Gdiplus::Color(255, 58, 58, 58) : Gdiplus::Color(255, 42, 42, 42)));
+				Gdiplus::SolidBrush chipBg(selected ? Gdiplus::Color(255, 255, 204, 0)
+					: (hovered ? ThemeGray(58, 222) : ThemeGray(42, 236)));
 				g.FillPath(&chipBg, &path);
 
 				Gdiplus::Color textColor = selected ? Gdiplus::Color(255, 28, 28, 28)
-					: (hovered ? white : Gdiplus::Color(255, 200, 200, 200));
+					: (hovered ? white : ThemeGray(200, 90));
 				drawText(m_categories[i].c_str(), selected ? f14b : f14, textColor,
 					(float)r.left, (float)r.top, (float)w, (float)h, fmtCenter);
 			}
@@ -1300,7 +1440,7 @@ namespace YuMediaPlayer
 				drawText(L"\u4E13\u8F91", f13, dimGray, (float)c.albumX, hy, (float)(c.heartX - c.albumX - 12), hh, fmtLeft);
 			drawText(L"\u65F6\u957F", f13, dimGray, (float)c.durX, hy, (float)(kColDur - 8), hh, fmtRight);
 
-			Gdiplus::Pen divider(Gdiplus::Color(255, 50, 50, 50), 1.0f);
+			Gdiplus::Pen divider(ThemeGray(50, 232), 1.0f);
 			g.DrawLine(&divider, (int)m_listHeaderRect.left, (int)m_listHeaderRect.bottom - 1,
 				(int)m_listHeaderRect.right, (int)m_listHeaderRect.bottom - 1);
 		}
@@ -1350,7 +1490,7 @@ namespace YuMediaPlayer
 			{
 				Gdiplus::GraphicsPath path;
 				BuildRoundRectPath(path, Gdiplus::Rect(m_listRect.left, rowTop + 2, listW, kRowHeight - 4), 8);
-				Gdiplus::SolidBrush rowBg(selected ? Gdiplus::Color(255, 50, 50, 50) : Gdiplus::Color(255, 40, 40, 40));
+				Gdiplus::SolidBrush rowBg(selected ? ThemeGray(50, 236) : ThemeGray(40, 248));
 				g.FillPath(&rowBg, &path);
 			}
 
@@ -1392,7 +1532,7 @@ namespace YuMediaPlayer
 				}
 				else
 				{
-					Gdiplus::Pen heartPen(Gdiplus::Color(255, 120, 120, 120), 1.5f);
+					Gdiplus::Pen heartPen(ThemeGray(120, 160), 1.5f);
 					g.DrawPath(&heartPen, &heart);
 				}
 			}
@@ -1411,7 +1551,7 @@ namespace YuMediaPlayer
 			int thumbY = m_listRect.top + (int)((long long)(listH - thumbH) * scroll / maxScroll);
 			Gdiplus::GraphicsPath thumb;
 			BuildRoundRectPath(thumb, Gdiplus::Rect(m_contentRect.right - 12, thumbY, 4, thumbH), 2);
-			Gdiplus::SolidBrush thumbBrush(Gdiplus::Color(255, 90, 90, 90));
+			Gdiplus::SolidBrush thumbBrush(ThemeGray(90, 200));
 			g.FillPath(&thumbBrush, &thumb);
 		}
 	}
@@ -1421,7 +1561,7 @@ namespace YuMediaPlayer
 		if (m_searchEdit || !m_hwnd)
 			return;
 
-		m_searchBrush = CreateSolidBrush(RGB(44, 44, 44));   // 和搜索胶囊同色
+		m_searchBrush = CreateSolidBrush(ThemeRef(44, 238));   // 和搜索胶囊同色
 		m_searchFont = CreateFontW(-16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
 			DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
 			CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Microsoft YaHei");
@@ -1620,7 +1760,42 @@ namespace YuMediaPlayer
 	}
 	void WindowGUI::SetOnlineTracks(std::vector<TrackItem> tracks) { SetTracksInternal(0, std::move(tracks)); }
 	void WindowGUI::SetLocalTracks(std::vector<TrackItem> tracks) { SetTracksInternal(1, std::move(tracks)); }
-	void WindowGUI::SetFavoriteTracks(std::vector<TrackItem> tracks) { SetTracksInternal(2, std::move(tracks)); }
+	void WindowGUI::SetFavoriteTracks(std::vector<TrackItem> tracks)
+	{
+		m_tracks[2] = std::move(tracks);
+
+		// 保留滚动位置（只按新的总高度夹一下），取消喜欢后列表不会跳回顶部
+		const int listH = m_listRect.bottom - m_listRect.top;
+		const int total = (int)m_tracks[2].size() * kRowHeight;
+		const int maxScroll = total > listH ? total - listH : 0;
+		m_scroll[2] = ClampInt(m_scroll[2], 0, maxScroll);
+		if (m_selectedRow[2] >= (int)m_tracks[2].size())
+			m_selectedRow[2] = -1;
+		m_hoverRow = -1;
+		if (m_hwnd)
+			InvalidateRect(m_hwnd, &m_contentRect, FALSE);
+	}
+
+	const TrackItem* WindowGUI::GetTrack(int page, int row) const
+	{
+		if (page < 0 || page >= kSidebarCount || row < 0 || row >= (int)m_tracks[page].size())
+			return nullptr;
+		return &m_tracks[page][row];
+	}
+
+	void WindowGUI::SetTrackFavorite(const std::wstring& path, bool favorite)
+	{
+		bool changed = false;
+		for (int p = 0; p < kSidebarCount; p++)
+			for (TrackItem& t : m_tracks[p])
+				if (t.path == path && t.favorite != favorite)
+				{
+					t.favorite = favorite;
+					changed = true;
+				}
+		if (changed && m_hwnd)
+			InvalidateRect(m_hwnd, &m_listRect, FALSE);
+	}
 
 	void WindowGUI::SetCategories(std::vector<std::wstring> categories)
 	{
@@ -1693,8 +1868,17 @@ namespace YuMediaPlayer
 			if (m_searchEdit && (HWND)lParam == m_searchEdit)
 			{
 				HDC hEditDc = (HDC)wParam;
-				SetTextColor(hEditDc, RGB(235, 235, 235));
-				SetBkColor(hEditDc, RGB(44, 44, 44));
+				const COLORREF editBk = ThemeRef(44, 238);
+				// 切换主题后，输入框背景刷子的颜色要跟着换
+				LOGBRUSH lb = {};
+				if (!m_searchBrush || GetObject(m_searchBrush, sizeof(lb), &lb) == 0 || lb.lbColor != editBk)
+				{
+					if (m_searchBrush)
+						DeleteObject(m_searchBrush);
+					m_searchBrush = CreateSolidBrush(editBk);
+				}
+				SetTextColor(hEditDc, ThemeRef(235, 30));
+				SetBkColor(hEditDc, editBk);
 				return (LRESULT)m_searchBrush;
 			}
 			return DefWindowProcW(hwnd, msg, wParam, lParam);
@@ -1705,7 +1889,9 @@ namespace YuMediaPlayer
 				if (HIWORD(wParam) == EN_SETFOCUS || HIWORD(wParam) == EN_KILLFOCUS)
 				{
 					m_searchFocused = (HIWORD(wParam) == EN_SETFOCUS);
-					InvalidateRect(hwnd, &m_searchRect, FALSE);
+					RECT sr = m_searchRect;
+					InflateRect(&sr, 2, 2);   // border/antialias pixels fall outside the exact rect
+					InvalidateRect(hwnd, &sr, FALSE);
 				}
 				return 0;
 			}
@@ -1726,6 +1912,16 @@ namespace YuMediaPlayer
 				SetCapture(hwnd);
 				m_currentSeconds = (int)(SeekRatioFromX(pt.x) * m_totalSeconds + 0.5f);
 				InvalidateRect(hwnd, &m_playBarRect, FALSE);
+				return 0;
+			}
+			// 点音量波浪线/圆点：开始拖动，实时改变音量
+			if (m_volumeSliderRect.right > m_volumeSliderRect.left && PtInRect(&m_volumeSliderRect, pt))
+			{
+				m_volDragging = true;
+				SetCapture(hwnd);
+				SetVolume(VolumeFromX(pt.x));
+				if (m_onVolume)
+					m_onVolume(m_volume);
 				return 0;
 			}
 			if (m_searchEdit && IsWindowVisible(m_searchEdit) && PtInRect(&m_searchRect, pt))
@@ -1797,7 +1993,7 @@ namespace YuMediaPlayer
 			UpdateContentRects(width, height);  // 内容区位置依赖侧边栏和播放栏
 
 			// 绘制背景
-			HBRUSH hBgBrush = CreateSolidBrush(RGB(24, 24, 24));
+			HBRUSH hBgBrush = CreateSolidBrush(ThemeRef(24, 240));
 			FillRect(hdc, &rc, hBgBrush);
 			DeleteObject(hBgBrush);
 
@@ -1833,7 +2029,7 @@ namespace YuMediaPlayer
 
 			// 绘制标题栏左上角 logo
 			if (m_logoIcon)
-				DrawIconEx(hdc, kLogoX, kLogoY, m_logoIcon, kLogoSize, kLogoSize, 0, nullptr, DI_NORMAL);
+				DrawIconEx(hdc, kLogoX, SidebarLogoY(m_sidebarRect), m_logoIcon, kLogoSize, kLogoSize, 0, nullptr, DI_NORMAL);
 
 			// 绘制按钮
 			for (int i = 0; i < 5; i++)
@@ -1873,6 +2069,15 @@ namespace YuMediaPlayer
 			{
 				m_currentSeconds = (int)(SeekRatioFromX(pt.x) * m_totalSeconds + 0.5f);
 				InvalidateRect(hwnd, &m_playBarRect, FALSE);
+				return 0;
+			}
+
+			// 拖动音量圆点
+			if (m_volDragging)
+			{
+				SetVolume(VolumeFromX(pt.x));
+				if (m_onVolume)
+					m_onVolume(m_volume);
 				return 0;
 			}
 
@@ -1986,6 +2191,17 @@ namespace YuMediaPlayer
 				return 0;
 			}
 
+			// 音量拖动结束
+			if (m_volDragging)
+			{
+				m_volDragging = false;
+				ReleaseCapture();
+				SetVolume(VolumeFromX(pt.x));
+				if (m_onVolume)
+					m_onVolume(m_volume);
+				return 0;
+			}
+
 			// 检查按钮点击
 			if (PtInRect(&m_buttonRects[static_cast<int>(ButtonType::Close)], pt))
 			{
@@ -2062,6 +2278,13 @@ namespace YuMediaPlayer
 			{
 				if (m_onNext)
 					m_onNext();
+				return 0;
+			}
+			// 循环模式按钮：点一下切换到下一个模式（列表循环 -> 单曲循环 -> 随机播放 -> 心动循环 -> ...）
+			if (PtInRect(&m_loopRect, pt))
+			{
+				if (m_onLoop)
+					m_onLoop();
 				return 0;
 			}
 			// 侧边栏按钮（乐馆 / 本地 / 喜欢）

@@ -61,6 +61,9 @@ namespace YuMediaPlayer
 	}
 
 	UINT GetCurrentLoopMode();
+	// 代码里切换循环模式（参数是 ContextMenuCommand::LoopModeXxx，其它值忽略）。
+	// 主窗口播放栏的循环按钮用它，和右键菜单里的"循环模式"共用同一个状态。
+	void SetCurrentLoopMode(UINT command);
 
 	void MeasureMiniPlayerMenuItem(MEASUREITEMSTRUCT& mis);
 	void DrawMiniPlayerMenuItem(const DRAWITEMSTRUCT& dis);
@@ -124,6 +127,11 @@ namespace YuMediaPlayer
 	// 静音状态：点音量按钮在静音/恢复之间切换；程序启动/退出时会复位成"未静音"
 	bool IsSoundMuted();
 	void SetSoundMuted(bool muted);
+	// 本程序的音量 0.0~1.0（只影响本程序，不动系统主音量）。
+	// SetSoundVolume 时如果 unmute=true、当前是静音且音量 > 0，会自动取消静音
+	// （用户拖音量时用 true；切歌时重新应用音量用 false，别把用户的静音冲掉）。
+	float GetSoundVolume();
+	void SetSoundVolume(float volume01, bool unmute = true);
 	void HandleListButtonClick(HWND hwnd);
 	void HandleHeartButtonClick(HWND hwnd);
 	void HandlePreviousButtonClick(HWND hwnd);

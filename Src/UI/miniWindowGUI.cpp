@@ -2,6 +2,7 @@
 #include "UI\WindowGUI.h"
 #include "TrayIcon.h"
 #include "Core/AudioPlayer.h"
+#include "Core/Theme.h"   // UITheme：深色/浅色主题
 #include <algorithm>
 #include <cmath>
 #include <mmdeviceapi.h>   // 静音：Core Audio（音频会话音量）
@@ -10,6 +11,16 @@
 
 namespace YuMediaPlayer
 {
+	// ---- 主题：迷你窗口图标颜色（深色=浅灰/白，浅色=深灰/黑）----
+	static Gdiplus::Color MiniIdleColor(BYTE a = 235)
+	{
+		return UITheme::IsLight() ? Gdiplus::Color(a, 70, 70, 70) : Gdiplus::Color(a, 235, 235, 235);
+	}
+	static Gdiplus::Color MiniHoverColor(BYTE a = 255)
+	{
+		return UITheme::IsLight() ? Gdiplus::Color(a, 0, 0, 0) : Gdiplus::Color(a, 255, 255, 255);
+	}
+
 	// 注意：这里以前有一个文件内的全局变量 WindowGUI* m_windowGUI，初值 nullptr，而且整个工程里
 	// 从来没有人给它赋过值——它跟 MainWindow 里的成员 m_windowGUI（unique_ptr）是两个毫不相干的东西。
 	// HandleMiniButtonClick 和"完整模式"菜单项都在判断这个永远为空的全局指针，
@@ -40,9 +51,10 @@ namespace YuMediaPlayer
 		constexpr wchar_t kLoopShuffleText[] = L"随机播放";
 		constexpr wchar_t kLoopHeartText[] = L"心动循环";
 
-		constexpr COLORREF kMenuBackColor = RGB(24, 24, 24);      // 菜单整体背景
-		constexpr COLORREF kMenuHighlightColor = RGB(55, 55, 55); // 鼠标悬停/选中时的背景
-		constexpr COLORREF kMenuTextColor = RGB(230, 230, 230);   // 文字颜色
+		// 右键菜单配色：跟随主题（深色 / 浅色）
+		inline COLORREF MenuBackColor() { return UITheme::Pick(RGB(24, 24, 24), RGB(250, 250, 250)); }      // 菜单整体背景
+		inline COLORREF MenuHighlightColor() { return UITheme::Pick(RGB(55, 55, 55), RGB(228, 228, 232)); } // 鼠标悬停/选中时的背景
+		inline COLORREF MenuTextColor() { return UITheme::Pick(RGB(230, 230, 230), RGB(32, 32, 32)); }      // 文字颜色
 
 		constexpr int kCheckGutter = 20; // 给勾选标记留的左侧宽度，所有项统一预留，保证文字对齐
 
@@ -143,9 +155,10 @@ namespace YuMediaPlayer
 
 		HBRUSH DarkMenuBackgroundBrush()
 		{
-			// 只创建一次，进程生命周期内复用，不需要每次弹菜单都新建/销毁。
-			static HBRUSH s_brush = CreateSolidBrush(kMenuBackColor);
-			return s_brush;
+			// 深色、浅色各创建一次，进程生命周期内复用，按当前主题返回。
+			static HBRUSH s_dark = CreateSolidBrush(RGB(24, 24, 24));
+			static HBRUSH s_light = CreateSolidBrush(RGB(250, 250, 250));
+			return UITheme::IsLight() ? s_light : s_dark;
 		}
 
 		bool IsLoopModeCommand(UINT_PTR cmd)
@@ -219,6 +232,12 @@ namespace YuMediaPlayer
 		SelectObject(hdc, hOldPen);
 		DeleteObject(hBrush);
 		DeleteObject(hPen);
+	}
+
+	void SetCurrentLoopMode(UINT command)
+	{
+		if (IsLoopModeCommand(static_cast<UINT_PTR>(command)))
+			s_currentLoopMode = command;
 	}
 
 	UINT GetCurrentLoopMode()
@@ -391,12 +410,12 @@ namespace YuMediaPlayer
 		bool selected = (dis.itemState & ODS_SELECTED) != 0;
 		bool checked = (dis.itemState & ODS_CHECKED) != 0;
 
-		HBRUSH hBrush = CreateSolidBrush(selected ? kMenuHighlightColor : kMenuBackColor);
+		HBRUSH hBrush = CreateSolidBrush(selected ? MenuHighlightColor() : MenuBackColor());
 		FillRect(hdc, &rc, hBrush);
 		DeleteObject(hBrush);
 
 		SetBkMode(hdc, TRANSPARENT);
-		SetTextColor(hdc, kMenuTextColor);
+		SetTextColor(hdc, MenuTextColor());
 
 		if (checked)
 		{
@@ -587,8 +606,8 @@ namespace YuMediaPlayer
 
 		Gdiplus::SolidBrush iconBrush(
 			hovered
-			? Gdiplus::Color(255, 255, 255, 255)
-			: Gdiplus::Color(235, 235, 235, 235)
+			? MiniHoverColor()
+			: MiniIdleColor()
 		);
 
 		// 图标尺寸
@@ -651,8 +670,8 @@ namespace YuMediaPlayer
 
 		Gdiplus::SolidBrush iconBrush(
 			hovered
-			? Gdiplus::Color(255, 255, 255, 255)
-			: Gdiplus::Color(235, 235, 235, 235)
+			? MiniHoverColor()
+			: MiniIdleColor()
 		);
 
 		const float iconWidth = 12.0f;
@@ -785,7 +804,7 @@ namespace YuMediaPlayer
 		Gdiplus::SolidBrush iconBrush(
 			hovered
 			? Gdiplus::Color(255, 255, 100, 100)  // 悬停时：红色
-			: Gdiplus::Color(235, 235, 235, 235)  // 正常时：浅灰色
+			: MiniIdleColor()  // 正常时：浅灰色
 		);
 
 		// 图标尺寸
@@ -819,7 +838,7 @@ namespace YuMediaPlayer
 		Gdiplus::Color iconColor(
 			hovered
 			? Gdiplus::Color(255, 0, 100, 200)	  // 悬停时：蓝色
-			: Gdiplus::Color(235, 235, 235, 235)  // 正常时：浅灰色
+			: MiniIdleColor()  // 正常时：浅灰色
 		);
 
 		// 创建画笔用于绘制框线
@@ -844,8 +863,8 @@ namespace YuMediaPlayer
 		// 网易云音乐风格的音量图标：圆角喇叭（小方块 + 向外张开的喇叭口）+ 两道弧形音波。
 		// 静音时不画音波，改画一个 ×。全部用 GDI+ 矢量绘制，不需要任何 SVG / 图片资源。
 		const Gdiplus::Color iconColor = hovered
-			? Gdiplus::Color(255, 255, 255, 255)   // 悬停时：白色
-			: Gdiplus::Color(235, 235, 235, 235);  // 正常时：浅灰色
+			? MiniHoverColor()   // 悬停时：白色
+			: MiniIdleColor();  // 正常时：浅灰色
 		Gdiplus::SolidBrush iconBrush(iconColor);
 
 		// 用同色的圆角描边把喇叭的尖角磨圆
@@ -903,8 +922,8 @@ namespace YuMediaPlayer
 		// 根据悬停状态选择颜色
 		Gdiplus::SolidBrush iconBrush(
 			hovered
-			? Gdiplus::Color(255, 255, 255, 255)  // 悬停时：白色
-			: Gdiplus::Color(235, 235, 235, 235)  // 正常时：浅灰色
+			? MiniHoverColor()  // 悬停时：白色
+			: MiniIdleColor()  // 正常时：浅灰色
 		);
 
 		// 列表图标尺寸（放大一些，配合外层容器变大）
@@ -929,8 +948,8 @@ namespace YuMediaPlayer
 
 		Gdiplus::SolidBrush noteBrush(
 			hovered
-			? Gdiplus::Color(200, 255, 255, 255)
-			: Gdiplus::Color(180, 235, 235, 235)
+			? MiniHoverColor(200)
+			: MiniIdleColor(180)
 		);
 
 		// 绘制小圆点作为装饰
@@ -991,8 +1010,8 @@ namespace YuMediaPlayer
 			// 未收藏：空心描边心形，悬停时变白，跟其它图标的悬停效果一致
 			Gdiplus::Pen outlinePen(
 				hovered
-				? Gdiplus::Color(255, 255, 255, 255)
-				: Gdiplus::Color(235, 235, 235, 235),
+				? MiniHoverColor()
+				: MiniIdleColor(),
 				penW);
 			outlinePen.SetLineJoin(Gdiplus::LineJoinRound);
 			g.DrawPath(&outlinePen, &path);
@@ -1115,6 +1134,41 @@ namespace YuMediaPlayer
 		}
 		if (SUCCEEDED(volume->SetMute(muted ? TRUE : FALSE, nullptr)))
 			s_soundMuted = muted;
+		volume->Release();
+	}
+
+	float GetSoundVolume()
+	{
+		ScopedCom com;
+		ISimpleAudioVolume* volume = AcquireSessionVolume();
+		if (!volume)
+			return 1.0f;
+		float v = 1.0f;
+		if (FAILED(volume->GetMasterVolume(&v)))
+			v = 1.0f;
+		volume->Release();
+		return v;
+	}
+
+	void SetSoundVolume(float volume01, bool unmute)
+	{
+		if (volume01 < 0.0f) volume01 = 0.0f;
+		if (volume01 > 1.0f) volume01 = 1.0f;
+
+		ScopedCom com;
+		ISimpleAudioVolume* volume = AcquireSessionVolume();
+		if (!volume)
+		{
+			OutputDebugStringW(L"[Volume] 取不到音频会话，音量设置失败\n");
+			return;
+		}
+		volume->SetMasterVolume(volume01, nullptr);
+		// 拖动音量时如果还处于静音，顺手取消静音，否则拖了也听不到变化
+		if (unmute && volume01 > 0.0f && s_soundMuted)
+		{
+			if (SUCCEEDED(volume->SetMute(FALSE, nullptr)))
+				s_soundMuted = false;
+		}
 		volume->Release();
 	}
 

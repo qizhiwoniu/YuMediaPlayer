@@ -126,6 +126,17 @@ namespace YuMediaPlayer
 		void BindMainWindowPlayer();      // 主窗口 上一曲/下一曲/播放/进度条/双击歌曲 -> 迷你窗口逻辑
 		void SyncMainWindowPlayer();      // 迷你窗口 -> 主窗口：歌名/歌手/播放状态/进度
 		void SeekToRatio(float ratio);
+
+		// ── 喜欢列表 ────────────────────────────────────────────────
+		// 统一入口：迷你窗口的心形按钮、主窗口列表里的爱心，都走这里。
+		// favorite=true 加入喜欢列表，false 从喜欢列表移除；同步两个窗口的心形、"喜欢"页，并存盘（favorites.txt）。
+		void SetFavoriteState(TrackItem item, bool favorite);
+		TrackItem MakeTrackItem(const Track& track) const;
+		void LoadFavorites();
+		void SaveFavorites() const;
+		// 主窗口底部播放栏的封面
+		void PushCoverToMainWindow(const Track* track);
+		std::vector<TrackItem> m_localItems;     // 最近一次扫描结果（下标 == 播放列表下标）
 		std::unique_ptr<LocalMusicScanner> m_scanner;
 		std::map<std::wstring, int> m_durations;   // 音频路径 -> 时长（秒），来自扫描标签
 		bool m_scanIsDefaultFolder = false;

@@ -2,12 +2,15 @@
 #include <dwmapi.h>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cwchar>
 #include <memory>
 #include <windowsx.h>
 #include <algorithm>
 #include <cmath>
 #include <set>
+#include <string>
+#include <shobjidl.h>   // IShellItemImageFactory：读取音频内嵌封面
 #include "Core/Theme.h"
 #include "UI/WindowGUI.h"
 #include "UI/miniWindowGUI.h"
@@ -22,6 +25,20 @@
 
 namespace YuMediaPlayer
 {
+	// ---- 迷你窗口主题色：深色 / 浅色（UITheme 在 Core/Theme.h，由设置页切换）----
+	static Gdiplus::Color MiniCardColor()
+	{
+		return UITheme::IsLight() ? Gdiplus::Color(255, 255, 255, 255) : Gdiplus::Color(255, 40, 40, 40);
+	}
+	static Gdiplus::Color MiniTitleColor(int alpha)
+	{
+		return UITheme::IsLight() ? Gdiplus::Color((BYTE)alpha, 30, 30, 30) : Gdiplus::Color((BYTE)alpha, 255, 255, 255);
+	}
+	static Gdiplus::Color MiniArtistColor(int alpha)
+	{
+		return UITheme::IsLight() ? Gdiplus::Color((BYTE)alpha, 110, 110, 110) : Gdiplus::Color((BYTE)alpha, 200, 200, 200);
+	}
+
 	PlayButtonInfo g_playButtonInfo = {};
 	std::wstring g_currentMp3Path = L"";
 	PlaybackButtonsInfo buttonsInfo = {};
@@ -50,6 +67,90 @@ namespace YuMediaPlayer
 	// 已收藏的歌曲（用音频文件路径当 key）。收藏按钮点一下加入/移除，Composite 里据此画实心/空心心形。
 	// 目前只存在内存里，程序退出就没了；以后要持久化，把这个集合读写到文件即可。
 	static std::set<std::wstring> s_favorites;
+	// 喜欢列表本体（按添加顺序），主窗口"喜欢"页显示的就是它；s_favorites 是同一批路径的快速查找集合。
+	// 持久化在 exe 同目录的 favorites.txt（见 LoadFavorites / SaveFavorites）。
+	static std::vector<TrackItem> s_favItems;
+	// 用户在主窗口拖出来的音量 0~1；<0 表示还没设置过。切歌后会重新应用一次，保证音量不丢。
+	static float s_userVolume = -1.0f;
+
+	// ── 淡入淡出（设置页"切歌淡入淡出时长"）──────────────────────────
+	// 实际音量 = 用户音量(s_userVolume) × 淡化系数(s_fadeFactor)。
+	// 开始播放：系数 0 -> 1（淡入，时长 = 设置秒数）；歌曲最后 N 秒：系数 1 -> 0（淡出）；
+	// 手动切歌：先把当前歌淡出（设置秒数的一半），再切到新歌淡入。设置为 0 = 全部关闭。
+	// 由 kFadeTimerId 定时器每 40ms 驱动（见 FadeTick）。
+	static constexpr UINT_PTR kFadeTimerId = 4002;
+	static float s_fadeFactor = 1.0f;
+	static int   s_fadeMode = 0;            // 0=无 1=淡入 2=手动切歌的淡出
+	static DWORD s_fadeStartTick = 0;
+	static float s_fadeOutSec = 0.5f;
+	static int   s_pendingIndex = -1;       // 淡出结束后要切到的歌
+	static bool  s_bypassFade = false;      // true 时 PlayTrack 直接切歌（歌曲自然结束 / 淡出完成时）
+
+	static void ApplyFadeVolume()
+	{
+		const float uv = (s_userVolume < 0.0f) ? 1.0f : s_userVolume;
+		SetSoundVolume(uv * s_fadeFactor, false);
+	}
+
+	// 每个定时器节拍调用一次。返回 >=0 表示淡出完成，调用者要 PlayTrack(返回值)。
+	static int FadeTick(float fadeSec, AudioPlayer* player)
+	{
+		int switchTo = -1;
+		const PlaybackState st = player ? player->GetPlaybackState() : PlaybackState::Stopped;
+		float target = s_fadeFactor;
+
+		if (fadeSec <= 0.0f || st == PlaybackState::Stopped)
+		{
+			// 关闭淡化 / 没在播放：系数归 1；有等着切的歌就直接切
+			s_fadeMode = 0;
+			target = 1.0f;
+			if (s_pendingIndex >= 0)
+			{
+				switchTo = s_pendingIndex;
+				s_pendingIndex = -1;
+			}
+		}
+		else if (s_fadeMode == 2)
+		{
+			const float el = (GetTickCount() - s_fadeStartTick) / 1000.0f;
+			target = 1.0f - el / (s_fadeOutSec > 0.05f ? s_fadeOutSec : 0.05f);
+			if (target <= 0.0f)
+			{
+				target = 0.0f;
+				s_fadeMode = 0;
+				switchTo = s_pendingIndex;
+				s_pendingIndex = -1;
+			}
+		}
+		else if (s_fadeMode == 1)
+		{
+			const float el = (GetTickCount() - s_fadeStartTick) / 1000.0f;
+			target = el / fadeSec;
+			if (target >= 1.0f)
+			{
+				target = 1.0f;
+				s_fadeMode = 0;
+			}
+		}
+		else if (st == PlaybackState::Playing)
+		{
+			// 正常播放：最后 fadeSec 秒淡出（歌太短就不淡出，免得一开头就在淡）
+			const float durSec = player->GetDuration() / 1000.0f;
+			const float remain = durSec - player->GetCurrentPosition() / 1000.0f;
+			if (durSec > fadeSec * 2.0f && remain < fadeSec)
+				target = remain > 0.0f ? remain / fadeSec : 0.0f;
+			else
+				target = 1.0f;
+		}
+
+		const float diff = target > s_fadeFactor ? target - s_fadeFactor : s_fadeFactor - target;
+		if (diff > 0.004f || (target >= 1.0f && s_fadeFactor < 1.0f) || (target <= 0.0f && s_fadeFactor > 0.0f))
+		{
+			s_fadeFactor = target;
+			ApplyFadeVolume();
+		}
+		return switchTo;
+	}
 
 	// 播放进度定时器：定期把 AudioPlayer 的播放进度推给封面外圈的进度环。
 	// （ID 1001=边缘悬停 2001=收起动画 3001=封面旋转，4001 没被占用）
@@ -244,6 +345,7 @@ namespace YuMediaPlayer
 			return false;
 
 		SetTimer(m_hwnd, kProgressTimerId, kProgressIntervalMs, nullptr);   // 进度环随播放走动
+		SetTimer(m_hwnd, kFadeTimerId, 40, nullptr);                        // 淡入淡出
 		
 		UpdateWindow(m_hwnd);
 		return true; 
@@ -389,6 +491,13 @@ namespace YuMediaPlayer
 			return true;
 		};
 
+		// 设置页切换深色/浅色主题：分层窗口要手动重画
+		if (msg == UITheme::ThemeChangedMessage())
+		{
+			Composite();
+			return 0;
+		}
+
 		switch (msg)
 		{
 		case WM_ENTERSIZEMOVE:
@@ -479,6 +588,19 @@ namespace YuMediaPlayer
 				SyncMainWindowPlayer();   // 主窗口的进度条/时间/播放状态跟着走
 				return 0;
 			}
+			else if (wParam == kFadeTimerId)
+			{
+				const float fadeSec = m_windowGUI
+					? static_cast<float>(m_windowGUI->GetSettingPage().GetSettings().fadeSeconds) : 0.0f;
+				const int switchTo = FadeTick(fadeSec, GetAudioPlayer());
+				if (switchTo >= 0)
+				{
+					s_bypassFade = true;
+					PlayTrack(switchTo);
+					s_bypassFade = false;
+				}
+				return 0;
+			}
 			else if (wParam == 3001)
 			{
 				// 更新角度后必须 Composite()，因为窗口使用 UpdateLayeredWindow。
@@ -561,7 +683,8 @@ namespace YuMediaPlayer
 			GetClientRect(hwnd, &rc);
 
 			static HBRUSH s_darkBrush = CreateSolidBrush(RGB(24, 24, 24)); // background
-			FillRect(hdc, &rc, s_darkBrush);
+			static HBRUSH s_lightBrush = CreateSolidBrush(RGB(240, 240, 240));
+			FillRect(hdc, &rc, UITheme::IsLight() ? s_lightBrush : s_darkBrush);
 
 			int clientW = rc.right - rc.left;
 			int clientH = rc.bottom - rc.top;
@@ -693,11 +816,10 @@ namespace YuMediaPlayer
 				// 否则心形不会跟着变）。
 				if (const Track* favTrack = m_playlist.Current())
 				{
-					auto it = s_favorites.find(favTrack->audioPath);
-					if (it != s_favorites.end())
-						s_favorites.erase(it);
-					else
-						s_favorites.insert(favTrack->audioPath);
+					// 翻转后的新状态：之前没收藏 -> 现在收藏。
+					// 同时更新主窗口"喜欢"页（加入/移除）和本地列表里的爱心。
+					const bool nowFavorite = (s_favorites.count(favTrack->audioPath) == 0);
+					SetFavoriteState(MakeTrackItem(*favTrack), nowFavorite);
 				}
 				HandleHeartButtonClick(hwnd);
 				Composite();
@@ -903,10 +1025,12 @@ namespace YuMediaPlayer
 
 			// 单曲循环：重播当前这首；列表循环 / 随机 / 心动循环：下一首
 			// （随机模式下 PlayNextTrack 里会随机挑，列表循环到末尾回到第一首）。
+			s_bypassFade = true;     // 自然播完：不用再淡出，直接切（新歌会淡入）
 			if (GetCurrentLoopMode() == ContextMenuCommand::LoopModeSingleLoop)
 				PlayTrack(m_playlist.CurrentIndex());
 			else
 				PlayNextTrack();
+			s_bypassFade = false;
 			return 0;
 		}
 		case WM_GETMINMAXINFO:
@@ -941,6 +1065,7 @@ namespace YuMediaPlayer
 				m_animationTimer = 0;
 			}
 			KillTimer(hwnd, kProgressTimerId);
+			KillTimer(hwnd, kFadeTimerId);
 			PostQuitMessage(0);
 			return 0;
 
@@ -1406,7 +1531,7 @@ namespace YuMediaPlayer
 				float cardRight = (std::min)((float)w, avatarRect.GetRight() + avatarSideMargin);
 
 				Gdiplus::RectF cardRect(cardX, 20.0f, cardRight - cardX, (float)h - 30.0f);
-				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
+				Gdiplus::SolidBrush cardBrush(MiniCardColor());
 
 				Gdiplus::GraphicsPath path;
 				float radius = 12.0f;
@@ -1428,7 +1553,7 @@ namespace YuMediaPlayer
 
 				// 绘制背景卡片（保持完全不透明，但宽度递减）
 				Gdiplus::RectF cardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
-				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
+				Gdiplus::SolidBrush cardBrush(MiniCardColor());
 
 				Gdiplus::GraphicsPath path;
 				float radius = 12.0f;
@@ -1468,8 +1593,8 @@ namespace YuMediaPlayer
 						int titleAlpha = (int)(255.0f * (1.0f - textAlphaProgress));
 						int artistAlpha = (int)(200.0f * (1.0f - textAlphaProgress));
 						
-						Gdiplus::SolidBrush titleBrush(Gdiplus::Color(titleAlpha, 255, 255, 255));
-						Gdiplus::SolidBrush artistBrush(Gdiplus::Color(artistAlpha, 200, 200, 200));
+						Gdiplus::SolidBrush titleBrush(MiniTitleColor(titleAlpha));
+						Gdiplus::SolidBrush artistBrush(MiniArtistColor(artistAlpha));
 
 						bool hasBoth = !m_trackTitle.empty() && !m_trackArtist.empty();
 						if (hasBoth)
@@ -1503,7 +1628,7 @@ namespace YuMediaPlayer
 				
 				// 绘制背景卡片（始终可见，完全不透明）
 				Gdiplus::RectF cardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
-				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
+				Gdiplus::SolidBrush cardBrush(MiniCardColor());
 
 				Gdiplus::GraphicsPath path;
 				float radius = 12.0f;
@@ -1543,8 +1668,8 @@ namespace YuMediaPlayer
 						int titleAlpha = (int)(255.0f * textAlphaProgress);
 						int artistAlpha = (int)(200.0f * textAlphaProgress);
 						
-						Gdiplus::SolidBrush titleBrush(Gdiplus::Color(titleAlpha, 255, 255, 255));
-						Gdiplus::SolidBrush artistBrush(Gdiplus::Color(artistAlpha, 200, 200, 200));
+						Gdiplus::SolidBrush titleBrush(MiniTitleColor(titleAlpha));
+						Gdiplus::SolidBrush artistBrush(MiniArtistColor(artistAlpha));
 
 						bool hasBoth = !m_trackTitle.empty() && !m_trackArtist.empty();
 						if (hasBoth)
@@ -1579,7 +1704,7 @@ namespace YuMediaPlayer
 
 				// 绘制背景卡片（保持完全不透明，但宽度递减）
 				Gdiplus::RectF cardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
-				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
+				Gdiplus::SolidBrush cardBrush(MiniCardColor());
 
 				Gdiplus::GraphicsPath path;
 				float radius = 12.0f;
@@ -1619,8 +1744,8 @@ namespace YuMediaPlayer
 						int titleAlpha = (int)(255.0f * (1.0f - textAlphaProgress));
 						int artistAlpha = (int)(200.0f * (1.0f - textAlphaProgress));
 						
-						Gdiplus::SolidBrush titleBrush(Gdiplus::Color(titleAlpha, 255, 255, 255));
-						Gdiplus::SolidBrush artistBrush(Gdiplus::Color(artistAlpha, 200, 200, 200));
+						Gdiplus::SolidBrush titleBrush(MiniTitleColor(titleAlpha));
+						Gdiplus::SolidBrush artistBrush(MiniArtistColor(artistAlpha));
 
 						bool hasBoth = !m_trackTitle.empty() && !m_trackArtist.empty();
 						if (hasBoth)
@@ -1654,7 +1779,7 @@ namespace YuMediaPlayer
 				
 				// 绘制背景卡片（始终可见，完全不透明）
 				Gdiplus::RectF cardRect(10.0f, 20.0f, (float)w - 20.0f, (float)h - 30.0f);
-				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
+				Gdiplus::SolidBrush cardBrush(MiniCardColor());
 
 				Gdiplus::GraphicsPath path;
 				float radius = 12.0f;
@@ -1694,8 +1819,8 @@ namespace YuMediaPlayer
 						int titleAlpha = (int)(255.0f * textAlphaProgress);
 						int artistAlpha = (int)(200.0f * textAlphaProgress);
 						
-						Gdiplus::SolidBrush titleBrush(Gdiplus::Color(titleAlpha, 255, 255, 255));
-						Gdiplus::SolidBrush artistBrush(Gdiplus::Color(artistAlpha, 200, 200, 200));
+						Gdiplus::SolidBrush titleBrush(MiniTitleColor(titleAlpha));
+						Gdiplus::SolidBrush artistBrush(MiniArtistColor(artistAlpha));
 
 						bool hasBoth = !m_trackTitle.empty() && !m_trackArtist.empty();
 						if (hasBoth)
@@ -1734,7 +1859,7 @@ namespace YuMediaPlayer
 				// 也就自然是窗口客户区坐标，命中测试不用改。
 				const float bodyTop = s_panelAbove ? (float)s_panelExtraH : 0.0f;
 				Gdiplus::RectF cardRect(10.0f, bodyTop + 20.0f, (float)w - 20.0f, (float)bodyH - 30.0f);
-				Gdiplus::SolidBrush cardBrush(Gdiplus::Color(255, 40, 40, 40));
+				Gdiplus::SolidBrush cardBrush(MiniCardColor());
 
 				Gdiplus::GraphicsPath path;
 				float radius = 12.0f;
@@ -1836,8 +1961,8 @@ namespace YuMediaPlayer
 
 		Gdiplus::Font titleFont(L"Microsoft YaHei UI", 15.0f, Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
 		Gdiplus::Font artistFont(L"Microsoft YaHei UI", 13.0f, Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
-		Gdiplus::SolidBrush titleBrush(Gdiplus::Color(255, 255, 255));
-		Gdiplus::SolidBrush artistBrush(Gdiplus::Color(200, 200, 200));
+		Gdiplus::SolidBrush titleBrush(MiniTitleColor(255));
+		Gdiplus::SolidBrush artistBrush(MiniArtistColor(200));
 
 		const bool hasBoth = !m_trackTitle.empty() && !m_trackArtist.empty();
 		if (hasBoth)
@@ -1911,18 +2036,22 @@ namespace YuMediaPlayer
 	// 把一首歌对应的封面、歌名、歌手、进度环复位应用到界面上。
 	// 注意这里不调用 Composite()——调用者（PlayTrack / Initialize）
 	// 会在合适的时机统一重绘一次。
+	static std::wstring FindCoverFor(const std::wstring& audioPath, const std::wstring& title, const std::wstring& artist);
+
 	void MainWindow::ApplyTrackToUi(const Track& track)
 	{
-		// 这首歌没有找到同名封面：明确清空，回到黑胶占位样式，
-		// 否则上一首歌的封面会一直留在界面上。
+		// 封面路径：Playlist/扫描器给的；没有就自己去 disk 目录等位置按歌名找一下。
+		// 都没有：明确清空，回到黑胶占位样式，否则上一首歌的封面会一直留在界面上。
 		// （LoadImageFromFile 加载失败时内部也会先清掉旧图，所以两条路径的结果一致。）
-		if (track.coverPath.empty())
+		const std::wstring coverPath = track.coverPath.empty()
+			? FindCoverFor(track.audioPath, track.title, track.artist) : track.coverPath;
+		if (coverPath.empty())
 		{
 			m_avatar.ClearImage();
 		}
-		else if (!m_avatar.LoadImageFromFile(track.coverPath))
+		else if (!m_avatar.LoadImageFromFile(coverPath))
 		{
-			OutputDebugStringW((L"[MainWindow] 封面加载失败：" + track.coverPath + L"\n").c_str());
+			OutputDebugStringW((L"[MainWindow] 封面加载失败：" + coverPath + L"\n").c_str());
 		}
 
 		// 新的一首，进度环归零。
@@ -1936,6 +2065,28 @@ namespace YuMediaPlayer
 	// 头像旋转状态（右键菜单里的"旋转"）不受影响：正在转就继续转，只是换了张封面。
 	void MainWindow::PlayTrack(int index)
 	{
+		// 开了淡入淡出、而且正在播放：先把当前这首淡出，淡出完成后（FadeTick）再真正切歌
+		if (!s_bypassFade && m_windowGUI)
+		{
+			const int fadeSec = m_windowGUI->GetSettingPage().GetSettings().fadeSeconds;
+			AudioPlayer* cur = GetAudioPlayer();
+			if (fadeSec > 0 && cur && cur->GetPlaybackState() == PlaybackState::Playing
+				&& index >= 0 && index < m_playlist.Count())
+			{
+				if (s_fadeMode != 2)
+				{
+					s_fadeMode = 2;
+					s_fadeStartTick = GetTickCount();
+					// 从当前音量开始淡出：已经在淡出末段时，剩余时间按比例缩短
+					s_fadeOutSec = (fadeSec * 0.5f) * s_fadeFactor;
+					if (s_fadeOutSec < 0.15f) s_fadeOutSec = 0.15f;
+				}
+				s_pendingIndex = index;     // 连点下一首：以最后一次为准
+				return;
+			}
+		}
+		s_pendingIndex = -1;
+
 		if (!m_playlist.SetCurrent(index))
 			return;
 
@@ -1948,6 +2099,22 @@ namespace YuMediaPlayer
 
 		if (AudioPlayer* player = GetAudioPlayer())
 		{
+			// 先把淡化系数设好再开播，避免新歌开头闪一下大音量：
+			// 开了淡入淡出 -> 从 0 淡入；没开 -> 系数 1
+			const int fadeSecNow = m_windowGUI ? m_windowGUI->GetSettingPage().GetSettings().fadeSeconds : 0;
+			if (fadeSecNow > 0)
+			{
+				s_fadeFactor = 0.0f;
+				s_fadeMode = 1;
+				s_fadeStartTick = GetTickCount();
+			}
+			else
+			{
+				s_fadeFactor = 1.0f;
+				s_fadeMode = 0;
+			}
+			ApplyFadeVolume();
+
 			if (player->Play(track.audioPath))
 			{
 				// 开始播放 -> 封面自动开始旋转（切歌时已经在转就继续转；
@@ -1995,24 +2162,104 @@ namespace YuMediaPlayer
 		return s == std::wstring::npos ? std::wstring(L".") : p.substr(0, s);
 	}
 
-	// 和音频文件同名的封面图（周杰伦-七里香.mp3 -> 周杰伦-七里香.jpg/png/...），没有返回空
-	static std::wstring FindSiblingCover(const std::wstring& audioPath)
+	// 找一首歌的封面图。按下面的顺序在这些目录里找，同名（歌曲文件名 / 歌名 / "歌手 - 歌名"）的 jpg/jpeg/png/bmp：
+	//   1) 音频文件所在目录      2) 音频目录\\disk      3) 音频目录的上一级\\disk
+	//   4) exe目录\\disk         5) exe目录\\song\\disk   6) exe目录\\background\\disk
+	// 先找完全同名；找不到再找"文件名包含歌名（或歌曲文件名包含图片名）"的。没有返回空。
+	static std::wstring FindCoverFor(const std::wstring& audioPath, const std::wstring& title, const std::wstring& artist)
 	{
-		const size_t dot = audioPath.find_last_of(L'.');
+		auto lower = [](std::wstring v)
+		{
+			if (!v.empty())
+				CharLowerBuffW(&v[0], (DWORD)v.size());
+			return v;
+		};
+		auto isImage = [](const std::wstring& name)
+		{
+			const size_t d = name.find_last_of(L'.');
+			if (d == std::wstring::npos)
+				return false;
+			const wchar_t* e = name.c_str() + d;
+			return _wcsicmp(e, L".jpg") == 0 || _wcsicmp(e, L".jpeg") == 0
+				|| _wcsicmp(e, L".png") == 0 || _wcsicmp(e, L".bmp") == 0;
+		};
+
 		const size_t slash = audioPath.find_last_of(L"\\/");
-		if (dot == std::wstring::npos || (slash != std::wstring::npos && dot < slash))
+		const std::wstring audioDir = (slash == std::wstring::npos) ? std::wstring() : audioPath.substr(0, slash);
+		std::wstring base = (slash == std::wstring::npos) ? audioPath : audioPath.substr(slash + 1);
+		const size_t dot = base.find_last_of(L'.');
+		if (dot != std::wstring::npos)
+			base = base.substr(0, dot);
+
+		// 候选名字（小写）
+		std::vector<std::wstring> names;
+		auto addName = [&](const std::wstring& n)
+		{
+			if (!n.empty())
+				names.push_back(lower(n));
+		};
+		addName(base);
+		addName(title);
+		if (!artist.empty() && !title.empty())
+		{
+			addName(artist + L" - " + title);
+			addName(artist + L"-" + title);
+			addName(title + L" - " + artist);
+		}
+		if (names.empty())
 			return std::wstring();
 
-		static const wchar_t* kExts[] = { L".jpg", L".jpeg", L".png", L".bmp" };
-		const std::wstring base = audioPath.substr(0, dot);
-		for (const wchar_t* ext : kExts)
+		// 候选目录
+		std::vector<std::wstring> dirs;
+		if (!audioDir.empty())
 		{
-			const std::wstring c = base + ext;
-			const DWORD a = GetFileAttributesW(c.c_str());
-			if (a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY))
-				return c;
+			dirs.push_back(audioDir);
+			dirs.push_back(audioDir + L"\\disk");
+			const size_t up = audioDir.find_last_of(L"\\/");
+			if (up != std::wstring::npos)
+				dirs.push_back(audioDir.substr(0, up) + L"\\disk");
 		}
-		return std::wstring();
+		const std::wstring exe = ExeDir();
+		dirs.push_back(exe + L"\\disk");
+		dirs.push_back(exe + L"\\song\\disk");
+		dirs.push_back(exe + L"\\background\\disk");
+
+		std::wstring fuzzy;
+		for (const std::wstring& dir : dirs)
+		{
+			WIN32_FIND_DATAW fd;
+			HANDLE h = FindFirstFileW((dir + L"\\*").c_str(), &fd);
+			if (h == INVALID_HANDLE_VALUE)
+				continue;
+			do
+			{
+				if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+					continue;
+				const std::wstring fname = fd.cFileName;
+				if (!isImage(fname))
+					continue;
+				const std::wstring stem = lower(fname.substr(0, fname.find_last_of(L'.')));
+				for (const std::wstring& n : names)
+				{
+					if (stem == n)
+					{
+						FindClose(h);
+						return dir + L"\\" + fname;       // 完全同名，直接用
+					}
+				}
+				if (fuzzy.empty() && stem.size() >= 2)
+				{
+					for (const std::wstring& n : names)
+						if (n.find(stem) != std::wstring::npos || (n.size() >= 2 && stem.find(n) != std::wstring::npos))
+						{
+							fuzzy = dir + L"\\" + fname;
+							break;
+						}
+				}
+			} while (FindNextFileW(h, &fd));
+			FindClose(h);
+		}
+		return fuzzy;
 	}
 
 	void MainWindow::StartLocalScan(bool force)
@@ -2033,6 +2280,10 @@ namespace YuMediaPlayer
 
 		if (!m_scanner)
 			m_scanner = std::make_unique<LocalMusicScanner>();   // 内部有消息窗口，必须在 UI 线程创建
+
+		// 读取上次保存的喜欢列表，显示到主窗口"喜欢"页
+		LoadFavorites();
+		m_windowGUI->SetFavoriteTracks(s_favItems);
 
 		m_scanner->SetResultCallback([this](std::vector<TrackItem> items)
 			{
@@ -2070,7 +2321,7 @@ namespace YuMediaPlayer
 		{
 			Track t;
 			t.audioPath = it.path;
-			t.coverPath = FindSiblingCover(it.path);
+			t.coverPath = FindCoverFor(it.path, it.title, it.artist);
 			t.title = it.title;
 			t.artist = it.artist;
 			tracks.push_back(std::move(t));
@@ -2079,6 +2330,7 @@ namespace YuMediaPlayer
 				m_durations[it.path] = it.durationSeconds;
 			it.favorite = (s_favorites.count(it.path) > 0);
 		}
+		m_localItems = items;   // 留一份：迷你窗口收藏、喜欢页双击播放都要按路径查
 
 		// 列表面板展开时它的高度跟歌曲数有关，先收起来再换数据
 		if (s_playlistPanel.IsOpen())
@@ -2140,15 +2392,70 @@ namespace YuMediaPlayer
 				SyncMainWindowPlayer();    // 主窗口的图标
 			});
 
+		// 点循环模式按钮：列表循环 -> 单曲循环 -> 随机播放 -> 心动循环 -> 回到列表循环
+		// （和迷你窗口右键菜单里的"循环模式"共用同一个状态）
+		m_windowGUI->SetLoopCallback([this]()
+			{
+				UINT next = GetCurrentLoopMode() + 1;
+				if (next > ContextMenuCommand::LoopModeHeart || next < ContextMenuCommand::LoopModeListLoop)
+					next = ContextMenuCommand::LoopModeListLoop;
+				SetCurrentLoopMode(next);
+				m_windowGUI->SetLoopMode(static_cast<int>(next - ContextMenuCommand::LoopModeListLoop));
+			});
+
 		// 拖动/点击进度条
 		m_windowGUI->SetSeekCallback([this](float ratio) { SeekToRatio(ratio); });
 
 		// 双击"本地"页的歌曲 -> 播放。（乐馆/喜欢页暂时没有对应的播放列表，先忽略）
 		m_windowGUI->SetTrackActivateCallback([this](int page, int row)
 			{
-				if (page == 1 && row >= 0 && row < m_playlist.Count())
+				if (row < 0)
+					return;
+				if (page == 1 && row < m_playlist.Count())
+				{
 					PlayTrack(row);
+				}
+				else if (page == 2)
+				{
+					// 喜欢页：在本地播放列表里按路径找到这首再播放（找不到说明文件不在当前音乐目录里）
+					const TrackItem* t = m_windowGUI->GetTrack(2, row);
+					if (!t)
+						return;
+					for (size_t i = 0; i < m_localItems.size() && (int)i < m_playlist.Count(); i++)
+						if (m_localItems[i].path == t->path)
+						{
+							PlayTrack((int)i);
+							break;
+						}
+				}
 			});
+
+		// 主窗口列表里点爱心：WindowGUI 已经把那一行的 favorite 翻转过了，这里据此加入/移除喜欢列表
+		m_windowGUI->SetFavoriteToggleCallback([this](int page, int row)
+			{
+				const TrackItem* t = m_windowGUI->GetTrack(page, row);
+				if (!t)
+					return;
+				TrackItem item = *t;    // 拷一份：下面会重设列表，指针会失效
+				SetFavoriteState(item, item.favorite);
+				Composite();            // 迷你窗口的心形跟着变
+			});
+
+		// 拖动音量波浪线/圆点 -> 改本程序的音量
+		m_windowGUI->SetVolumeCallback([](float v)
+			{
+				s_userVolume = v;
+				SetSoundVolume(v * s_fadeFactor);
+			});
+		// 启动时按设置页里的"默认音量"
+		{
+			float v0 = m_windowGUI->GetSettingPage().GetSettings().volume / 100.0f;
+			if (v0 < 0.0f) v0 = 0.0f;
+			if (v0 > 1.0f) v0 = 1.0f;
+			s_userVolume = v0;
+			SetSoundVolume(v0, false);
+			m_windowGUI->SetVolume(v0);
+		}
 	}
 
 	void MainWindow::SeekToRatio(float ratio)
@@ -2171,6 +2478,256 @@ namespace YuMediaPlayer
 		SyncMainWindowPlayer();
 	}
 
+	// ===== 封面 =====
+
+	namespace
+	{
+		struct ShellComInit
+		{
+			HRESULT hr;
+			ShellComInit() : hr(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)) {}
+			~ShellComInit() { if (SUCCEEDED(hr)) CoUninitialize(); }
+		};
+
+		// 读图片文件到内存里（不锁文件）。失败返回 nullptr。
+		std::unique_ptr<Gdiplus::Image> LoadImageCopy(const std::wstring& path)
+		{
+			std::unique_ptr<Gdiplus::Bitmap> src(Gdiplus::Bitmap::FromFile(path.c_str(), FALSE));
+			if (!src || src->GetLastStatus() != Gdiplus::Ok || src->GetWidth() == 0 || src->GetHeight() == 0)
+				return nullptr;
+			Gdiplus::Bitmap* copy = src->Clone(0, 0, (INT)src->GetWidth(), (INT)src->GetHeight(), PixelFormat32bppARGB);
+			if (!copy || copy->GetLastStatus() != Gdiplus::Ok)
+			{
+				delete copy;
+				return nullptr;
+			}
+			return std::unique_ptr<Gdiplus::Image>(copy);
+		}
+
+		// 用 Windows 外壳取音频文件内嵌的专辑封面（mp3/flac/m4a/wma 的标签图片）。没有内嵌封面返回 nullptr。
+		std::unique_ptr<Gdiplus::Image> LoadEmbeddedCover(const std::wstring& audioPath)
+		{
+			ShellComInit com;
+			IShellItemImageFactory* factory = nullptr;
+			if (FAILED(SHCreateItemFromParsingName(audioPath.c_str(), nullptr, IID_PPV_ARGS(&factory))) || !factory)
+				return nullptr;
+
+			HBITMAP hbm = nullptr;
+			const SIZE size = { 300, 300 };
+			// THUMBNAILONLY：只要真正的缩略图（专辑封面），没有就失败，不要拿文件图标凑数
+			const HRESULT hr = factory->GetImage(size, SIIGBF_THUMBNAILONLY | SIIGBF_BIGGERSIZEOK, &hbm);
+			factory->Release();
+			if (FAILED(hr) || !hbm)
+				return nullptr;
+
+			std::unique_ptr<Gdiplus::Image> result;
+			{
+				std::unique_ptr<Gdiplus::Bitmap> src(Gdiplus::Bitmap::FromHBITMAP(hbm, nullptr));
+				if (src && src->GetLastStatus() == Gdiplus::Ok && src->GetWidth() > 0 && src->GetHeight() > 0)
+				{
+					Gdiplus::Bitmap* copy = src->Clone(0, 0, (INT)src->GetWidth(), (INT)src->GetHeight(), PixelFormat32bppARGB);
+					if (copy && copy->GetLastStatus() == Gdiplus::Ok)
+						result.reset(copy);
+					else
+						delete copy;
+				}
+			}
+			DeleteObject(hbm);
+			return result;
+		}
+	}
+
+	// 把当前歌曲的封面推给主窗口底部播放栏：先找同名图片，找不到再读音频内嵌封面，都没有就清空（显示灰色占位）
+	void MainWindow::PushCoverToMainWindow(const Track* track)
+	{
+		if (!m_windowGUI)
+			return;
+		std::unique_ptr<Gdiplus::Image> cover;
+		if (track)
+		{
+			if (!track->coverPath.empty())
+				cover = LoadImageCopy(track->coverPath);
+			if (!cover)
+			{
+				// Playlist 没给封面路径（或加载失败）：去 disk 目录等位置按歌名找
+				const std::wstring found = FindCoverFor(track->audioPath, track->title, track->artist);
+				if (!found.empty())
+					cover = LoadImageCopy(found);
+			}
+			if (!cover)
+				cover = LoadEmbeddedCover(track->audioPath);   // 最后试音频文件内嵌的封面
+		}
+		m_windowGUI->SetNowPlayingCover(std::move(cover));
+	}
+
+	// ===== 喜欢列表 =====
+
+	namespace
+	{
+		std::string ToUtf8(const std::wstring& w)
+		{
+			if (w.empty())
+				return std::string();
+			const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+			std::string s(n > 0 ? n : 0, '\0');
+			if (n > 0)
+				WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &s[0], n, nullptr, nullptr);
+			return s;
+		}
+
+		std::wstring FromUtf8(const std::string& s)
+		{
+			if (s.empty())
+				return std::wstring();
+			const int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), nullptr, 0);
+			std::wstring w(n > 0 ? n : 0, L'\0');
+			if (n > 0)
+				MultiByteToWideChar(CP_UTF8, 0, s.c_str(), (int)s.size(), &w[0], n);
+			return w;
+		}
+
+		// 字段里不能有制表符/换行（它们是分隔符）
+		std::wstring CleanField(std::wstring s)
+		{
+			for (wchar_t& c : s)
+				if (c == L'\t' || c == L'\r' || c == L'\n')
+					c = L' ';
+			return s;
+		}
+
+		std::wstring FavoritesFilePath()
+		{
+			return ExeDir() + L"\\userprofile\\favorites.txt";
+		}
+	}
+
+	void MainWindow::LoadFavorites()
+	{
+		s_favItems.clear();
+		s_favorites.clear();
+
+		FILE* f = nullptr;
+		if (_wfopen_s(&f, FavoritesFilePath().c_str(), L"rb") != 0 || !f)
+			return;
+		std::string data;
+		char buf[4096];
+		size_t n;
+		while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+			data.append(buf, n);
+		fclose(f);
+
+		if (data.size() >= 3 && (unsigned char)data[0] == 0xEF && (unsigned char)data[1] == 0xBB && (unsigned char)data[2] == 0xBF)
+			data.erase(0, 3);
+
+		size_t pos = 0;
+		while (pos < data.size())
+		{
+			size_t e = data.find('\n', pos);
+			if (e == std::string::npos)
+				e = data.size();
+			std::string line = data.substr(pos, e - pos);
+			pos = e + 1;
+			if (!line.empty() && line.back() == '\r')
+				line.pop_back();
+			if (line.empty())
+				continue;
+
+			// path \t title \t artist \t album \t seconds
+			std::vector<std::string> fields;
+			size_t b = 0;
+			while (true)
+			{
+				const size_t t = line.find('\t', b);
+				if (t == std::string::npos)
+				{
+					fields.push_back(line.substr(b));
+					break;
+				}
+				fields.push_back(line.substr(b, t - b));
+				b = t + 1;
+			}
+			if (fields[0].empty())
+				continue;
+
+			TrackItem it;
+			it.path = FromUtf8(fields[0]);
+			if (fields.size() > 1) it.title = FromUtf8(fields[1]);
+			if (fields.size() > 2) it.artist = FromUtf8(fields[2]);
+			if (fields.size() > 3) it.album = FromUtf8(fields[3]);
+			if (fields.size() > 4) it.durationSeconds = atoi(fields[4].c_str());
+			it.favorite = true;
+			if (s_favorites.insert(it.path).second)
+				s_favItems.push_back(std::move(it));
+		}
+	}
+
+	void MainWindow::SaveFavorites() const
+	{
+		std::string out;
+		for (const TrackItem& it : s_favItems)
+		{
+			out += ToUtf8(CleanField(it.path)) + '\t' + ToUtf8(CleanField(it.title)) + '\t'
+				+ ToUtf8(CleanField(it.artist)) + '\t' + ToUtf8(CleanField(it.album)) + '\t'
+				+ std::to_string(it.durationSeconds) + '\n';
+		}
+		FILE* f = nullptr;
+		if (_wfopen_s(&f, FavoritesFilePath().c_str(), L"wb") != 0 || !f)
+		{
+			OutputDebugStringW(L"[Favorite] 写 favorites.txt 失败\n");
+			return;
+		}
+		fwrite(out.data(), 1, out.size(), f);
+		fclose(f);
+	}
+
+	TrackItem MainWindow::MakeTrackItem(const Track& track) const
+	{
+		// 本地扫描结果里有就直接用（带专辑、时长）
+		for (const TrackItem& it : m_localItems)
+			if (it.path == track.audioPath)
+				return it;
+
+		TrackItem item;
+		item.path = track.audioPath;
+		item.title = track.title;
+		item.artist = track.artist;
+		auto d = m_durations.find(track.audioPath);
+		if (d != m_durations.end())
+			item.durationSeconds = d->second;
+		return item;
+	}
+
+	void MainWindow::SetFavoriteState(TrackItem item, bool favorite)
+	{
+		if (item.path.empty())
+			return;
+
+		if (favorite)
+		{
+			if (s_favorites.insert(item.path).second)
+			{
+				item.favorite = true;
+				s_favItems.push_back(item);
+			}
+		}
+		else if (s_favorites.erase(item.path) > 0)
+		{
+			s_favItems.erase(std::remove_if(s_favItems.begin(), s_favItems.end(),
+				[&](const TrackItem& t) { return t.path == item.path; }), s_favItems.end());
+		}
+		SaveFavorites();
+
+		for (TrackItem& t : m_localItems)
+			if (t.path == item.path)
+				t.favorite = favorite;
+
+		if (m_windowGUI)
+		{
+			m_windowGUI->SetTrackFavorite(item.path, favorite);   // 乐馆/本地页里的爱心
+			m_windowGUI->SetFavoriteTracks(s_favItems);           // "喜欢"页加入/移除这一行
+		}
+	}
+
 	void MainWindow::SyncMainWindowPlayer()
 	{
 		if (!m_windowGUI)
@@ -2187,6 +2744,17 @@ namespace YuMediaPlayer
 		AudioPlayer* player = GetAudioPlayer();
 		const PlaybackState st = player ? player->GetPlaybackState() : PlaybackState::Stopped;
 		const Track* cur = m_playlist.Current();
+
+		// 循环模式图标：迷你窗口右键菜单改了循环模式，这里同步过去
+		{
+			static int s_syncLoop = -1;
+			const int lm = static_cast<int>(GetCurrentLoopMode()) - static_cast<int>(ContextMenuCommand::LoopModeListLoop);
+			if (lm != s_syncLoop)
+			{
+				s_syncLoop = lm;
+				m_windowGUI->SetLoopMode(lm);
+			}
+		}
 
 		// 播放/暂停图标
 		const int stateInt = static_cast<int>(st);
@@ -2215,6 +2783,7 @@ namespace YuMediaPlayer
 			m_syncPath = path;
 			m_syncCur = m_syncTotal = -1;
 			m_windowGUI->SetNowPlaying(cur ? cur->title.c_str() : L"", cur ? cur->artist.c_str() : L"");
+			PushCoverToMainWindow(cur);    // 底部播放栏的封面
 		}
 
 		// 进度条 + 两端的时间文字：当前秒 = 播放比例 * 时长
