@@ -41,6 +41,95 @@ namespace
     // 想换成别的文件名/格式，改这一个常量就行。
     const wchar_t* const DEFAULT_COVER_FILENAME = L"周杰伦-七里香.png";
 
+
+    // 碟片中心 Logo：跟着封面一起旋转/停止。
+    //
+    // 这里不再假定 exe 一定就在项目根目录：
+    // Debug 常见路径类似：
+    //   YuMediaPlayer\out\build\x64-Debug\YuMediaPlayer.exe
+    // 而资源实际在：
+    //   YuMediaPlayer\Assets\ui\mini\MicLogo.png
+    // 所以从“当前工作目录”和“exe 目录”开始，逐级向父目录查找，
+    // 直到找到 Assets\ui\mini\MicLogo.png。
+    Bitmap* GetMicLogo()
+    {
+        static Bitmap* s_logo = nullptr;
+        if (s_logo)
+            return s_logo;
+
+        const std::wstring kRelativeLogo = L"Assets\\ui\\mini\\MicLogo.png";
+
+        std::vector<std::wstring> candidates;
+
+        // 1. 当前工作目录
+        {
+            wchar_t buf[MAX_PATH] = {};
+            DWORD len = GetCurrentDirectoryW(MAX_PATH, buf);
+            if (len > 0 && len < MAX_PATH)
+                candidates.push_back(std::wstring(buf, len) + L"\\" + kRelativeLogo);
+        }
+
+        // 2. exe 目录
+        std::wstring exeDir = GetExeDir();
+        if (!exeDir.empty())
+            candidates.push_back(exeDir + kRelativeLogo);
+
+        // 3. 从 exe 所在目录逐级向上找项目资源目录。
+        //    这样无论 exe 在 Debug / Release / out / build 的哪一级都能找到。
+        std::wstring parent = exeDir;
+        for (int i = 0; i < 8 && !parent.empty(); ++i)
+        {
+            // 去掉末尾的 '\\'
+            while (!parent.empty() && (parent.back() == L'\\' || parent.back() == L'/'))
+                parent.pop_back();
+
+            const size_t pos = parent.find_last_of(L"\\/");
+            if (pos == std::wstring::npos)
+                break;
+
+            parent = parent.substr(0, pos + 1);
+            candidates.push_back(parent + kRelativeLogo);
+        }
+
+        // 去重，同时逐个尝试加载。
+        for (size_t i = 0; i < candidates.size(); ++i)
+        {
+            bool duplicate = false;
+            for (size_t j = 0; j < i; ++j)
+            {
+                if (_wcsicmp(candidates[i].c_str(), candidates[j].c_str()) == 0)
+                {
+                    duplicate = true;
+                    break;
+                }
+            }
+            if (duplicate)
+                continue;
+
+            if (GetFileAttributesW(candidates[i].c_str()) == INVALID_FILE_ATTRIBUTES)
+                continue;
+
+            Bitmap* bmp = new Bitmap(candidates[i].c_str());
+            if (bmp->GetLastStatus() == Ok && bmp->GetWidth() > 0 && bmp->GetHeight() > 0)
+            {
+                s_logo = bmp;
+
+                wchar_t logBuf[1024] = {};
+                swprintf_s(logBuf, L"[CircularAvatar] MicLogo 加载成功: %s (%ux%u)\\n",
+                    candidates[i].c_str(), bmp->GetWidth(), bmp->GetHeight());
+                OutputDebugStringW(logBuf);
+                break;
+            }
+
+            delete bmp;
+        }
+
+        if (!s_logo)
+            OutputDebugStringW(L"[CircularAvatar] MicLogo 加载失败：未找到 Assets\\ui\\mini\\MicLogo.png\\n");
+
+        return s_logo;
+    }
+
     // 封面只会显示在 80 像素左右的圆里，但用户给的封面常常是 1000x1000 甚至更大。
     // 封面旋转时每一帧都要把它重新采样一遍，直接拿大图转，CPU 占用会很明显。
     // 所以加载完成后一次性缩小成"短边 256 像素"的副本（保持长宽比），之后每帧只画小图。
@@ -351,27 +440,24 @@ void CircularAvatar::Draw(Gdiplus::Graphics& graphics, const Gdiplus::RectF& rec
             }
             else if (m_skin.useVinylPlaceholder)
             {
-                SolidBrush discBrush(m_skin.vinylDiscColor);
+                // 黑色无孔碟片：这里不再绘制原来的中心白色圆环/小孔。
+                // 中心区域由下面的 MicLogo.png 负责显示。
+                SolidBrush discBrush(Color(255, 8, 8, 8));
                 graphics.FillEllipse(&discBrush, inset, inset, innerW, innerH);
 
                 float cx = inset + innerW / 2.0f;
                 float cy = inset + innerH / 2.0f;
                 float maxR = (std::min)(innerW, innerH) / 2.0f;
 
-                Pen groovePen(m_skin.vinylGrooveColor, 1.0f);
-                const float grooveRatios[] = { 0.55f, 0.72f, 0.88f };
+                // 保留轻微唱片纹理，但不画任何中心孔洞。
+                Pen groovePen(Color(255, 42, 42, 42), 1.0f);
+                const float grooveRatios[] = { 0.62f, 0.84f };
+                //const float grooveRatios[] = { 0.52f, 0.70f, 0.86f };三条线
                 for (float ratio : grooveRatios)
                 {
                     float r = maxR * ratio;
                     graphics.DrawEllipse(&groovePen, cx - r, cy - r, r * 2.0f, r * 2.0f);
                 }
-
-                float ringR = maxR * 0.20f;
-                float dotR = maxR * 0.11f;
-                SolidBrush ringBrush(m_skin.vinylDotRing);
-                graphics.FillEllipse(&ringBrush, cx - ringR, cy - ringR, ringR * 2.0f, ringR * 2.0f);
-                SolidBrush dotBrush(m_skin.vinylDotColor);
-                graphics.FillEllipse(&dotBrush, cx - dotR, cy - dotR, dotR * 2.0f, dotR * 2.0f);
             }
             else
             {
@@ -379,7 +465,37 @@ void CircularAvatar::Draw(Gdiplus::Graphics& graphics, const Gdiplus::RectF& rec
                 graphics.FillEllipse(&placeholder, inset, inset, innerW, innerH);
             }
 
-            // 封面内容画完了，撤销旋转变换（同时恢复到内圆剪裁）。
+            // 中心 MicLogo：叠加在黑色无孔碟片中央，并放在同一个旋转变换里面绘制。
+            // 这样 m_rotation 改变时，Logo 与碟片使用完全相同的旋转中心，
+            // 播放时一起转，暂停时一起停。
+            if (Bitmap* micLogo = GetMicLogo())
+            {
+                const UINT logoW = micLogo->GetWidth();
+                const UINT logoH = micLogo->GetHeight();
+                if (logoW > 0 && logoH > 0)
+                {
+                    const float logoMaxSize = (std::min)(innerW, innerH) * 0.38f;
+                    const float logoScale = (std::min)(
+                        logoMaxSize / static_cast<float>(logoW),
+                        logoMaxSize / static_cast<float>(logoH));
+                    const float drawW = logoW * logoScale;
+                    const float drawH = logoH * logoScale;
+                    const float drawX = inset + (innerW - drawW) / 2.0f;
+                    const float drawY = inset + (innerH - drawH) / 2.0f;
+
+                    graphics.SetInterpolationMode(InterpolationModeHighQualityBicubic);
+                    graphics.SetPixelOffsetMode(PixelOffsetModeHighQuality);
+                    graphics.SetCompositingQuality(CompositingQualityHighQuality);
+                    graphics.DrawImage(
+                        micLogo,
+                        drawX,
+                        drawY,
+                        drawW,
+                        drawH);
+                }
+            }
+
+            // 封面 + 中心 Logo 全部画完了，撤销旋转变换（同时恢复到内圆剪裁）。
             graphics.Restore(contentState);
 
             if (m_skin.borderColor.GetA() > 0)

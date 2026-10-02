@@ -6,7 +6,7 @@
 #define MyAppVersion "1.1.0.4"
 #define MyAppPublisher "余鹏"
 #define MyAppURL "https://github.com/qizhiwoniu"
-#define MyAppExeName "YuMeidaPlayer.exe"
+#define MyAppExeName "YuMediaPlayer.exe"
 #define MyAppAssocName MyAppName + " File"
 #define MyAppAssocExt ".myp"
 #define MyAppAssocKey StringChange(MyAppAssocName, " ", "") + MyAppAssocExt

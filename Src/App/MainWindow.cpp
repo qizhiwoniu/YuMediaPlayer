@@ -580,10 +580,14 @@ namespace YuMediaPlayer
 					if (diff > 0.0005f)   // 变化不到 0.05% 不重绘，省得白白合成整个分层窗口
 					{
 						m_avatar.SetProgress(p);
-						// 封面在旋转时，旋转定时器每帧都会重绘，不用再重复；窗口藏起来时也不用画
-						if (!IsAvatarRotating() && ::IsWindowVisible(hwnd))
-							Composite();
 					}
+					// 七彩进度环本身带时间偏移，即使播放进度这一帧没有明显变化，
+					// 也必须重绘，否则颜色会停住。
+					if (m_avatar.GetSkin().rainbowProgress &&
+						!m_isCollapsed && !m_isAnimating && ::IsWindowVisible(hwnd))
+						Composite();
+					else if (!IsAvatarRotating() && ::IsWindowVisible(hwnd) && diff > 0.0005f)
+						Composite();
 				}
 				SyncMainWindowPlayer();   // 主窗口的进度条/时间/播放状态跟着走
 				return 0;
