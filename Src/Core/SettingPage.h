@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <functional>
+#include "../../version.h"		
 #pragma comment(lib, "gdiplus.lib")
 
 namespace YuMediaPlayer
@@ -153,7 +154,7 @@ namespace YuMediaPlayer
 		std::wstring m_lastMusicFolder;     // 用来判断目录有没有真的变化
 		int m_openCombo = -1;               // 当前展开的下拉列表（设置项下标），没有则 -1
 		int m_comboScroll = 0;              // 下拉列表第一行显示的是第几项
-		std::wstring m_version = L"1.0.0";
+		std::wstring m_version = APP_VERSION;
 
 		std::function<void(const PlayerSettings&)> m_onChanged;
 		std::function<void()> m_onCheckUpdate;
