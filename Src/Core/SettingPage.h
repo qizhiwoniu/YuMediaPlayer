@@ -34,6 +34,10 @@ namespace YuMediaPlayer
 		bool autoCheckUpdate = true;    // 启动时自动检查更新
 		std::wstring musicFolder;       // 本地音乐目录，空=未设置
 
+		// ---- 音乐源（设置页"音乐源"）----
+		int  musicSource = 1;           // 0=酷狗(仅列表) 1=iTunes(30秒试听) 2=自建Subsonic服务器
+		std::wstring jamendoClientId;   // Jamendo 的 client_id，写在 settings.ini 的 [Music] JamendoClientId（程序不会覆盖它）
+
 		void Reset();                   // 恢复默认值
 		void Clamp();                   // 把各字段限制在合法范围内
 	};
@@ -71,13 +75,15 @@ namespace YuMediaPlayer
 		// 本地音乐目录被改动时回调（选了新目录 / 恢复默认清空目录），参数是新目录，空=未设置。
 		// Load()/SetSettings() 不触发；启动时请自己用 GetSettings().musicFolder 扫描一次
 		void SetMusicFolderChangedCallback(std::function<void(const std::wstring&)> callback);
+		// 音乐源被切换 / 重新读取 client_id 时回调（外部在这里重新加载在线歌曲）。Load()/SetSettings() 不触发
+		void SetMusicSourceChangedCallback(std::function<void()> callback);
 		// "关于"页显示的版本号文字，默认 1.0.0
 		void SetVersionText(const wchar_t* text);
 
 	private:
-		enum { kTabCount = 4 };
+		enum { kTabCount = 5 };   // 通用 / 界面 / 系统 / 音乐源 / 关于
 		enum ItemType { ItemToggle, ItemSlider, ItemChoice, ItemButton, ItemInfo, ItemCombo };
-		enum Action { ActNone, ActCheckUpdate, ActReset, ActPickFolder };
+		enum Action { ActNone, ActCheckUpdate, ActReset, ActPickFolder, ActOpenIni, ActReloadMusicSource };
 		enum HitKind { HitNone, HitClose, HitNav, HitItem, HitComboList };
 
 		struct Item
@@ -152,6 +158,7 @@ namespace YuMediaPlayer
 		bool m_lastAutoStart = false;
 		int m_lastLanguage = 0;
 		std::wstring m_lastMusicFolder;     // 用来判断目录有没有真的变化
+		int m_lastMusicSource = 0;          // 用来判断音乐源有没有真的变化
 		int m_openCombo = -1;               // 当前展开的下拉列表（设置项下标），没有则 -1
 		int m_comboScroll = 0;              // 下拉列表第一行显示的是第几项
 		std::wstring m_version = APP_VERSION;
@@ -160,5 +167,6 @@ namespace YuMediaPlayer
 		std::function<void()> m_onCheckUpdate;
 		std::function<void()> m_onCheckSettings;
 		std::function<void(const std::wstring&)> m_onMusicFolder;
+		std::function<void()> m_onMusicSource;
 	};
 }

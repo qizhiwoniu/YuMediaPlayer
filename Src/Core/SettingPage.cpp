@@ -1,10 +1,12 @@
 #include "SettingPage.h"
+#include "OnlineMusic.h"   // 切换音乐源时通知在线歌曲模块
 #include "Theme.h"   // UITheme：设置页改主题后，主窗口/迷你窗口跟着变
 #include <shlobj.h>
 #include <math.h>
 #include <wchar.h>
 #include <set>
 #include <algorithm>
+#include <initializer_list>
 
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "shell32.lib")
@@ -28,6 +30,7 @@ namespace YuMediaPlayer
 		volume = clampInt(volume, 0, 100);
 		fadeSeconds = clampInt(fadeSeconds, 0, 10);
 		cornerRadius = clampInt(cornerRadius, 0, 30);
+		musicSource = clampInt(musicSource, 0, 2);   // 0酷狗 1iTunes 2自建服务器
 	}
 
 	// ===================== 辅助代码 =====================
@@ -217,6 +220,28 @@ namespace YuMediaPlayer
 			{ { L"界面", L"Interface", L"インターフェース", L"인터페이스", L"介面" } },
 			{ { L"系统", L"System", L"システム", L"시스템", L"系統" } },
 			{ { L"关于", L"About", L"このアプリについて", L"정보", L"關於" } },
+			{ { L"音乐源", L"Music Source", L"音楽ソース", L"음악 소스", L"音樂來源" } },
+			{ { L"在线歌曲的来源接口", L"Source of online songs", L"オンライン曲の取得元", L"온라인 곡 소스", L"線上歌曲的來源介面" } },
+			{ { L"酷狗音乐（仅歌曲列表）", L"Kugou (song list only)", L"KuGou（曲リストのみ）", L"쿠거우 (곡 목록만)", L"酷狗音樂（僅歌曲列表）" } },
+			{ { L"iTunes 试听（国内可用）", L"iTunes previews (works in China)", L"iTunes 試聴（中国から利用可）", L"iTunes 미리듣기 (중국 내 사용 가능)", L"iTunes 試聽（國內可用）" } },
+			{ { L"自建服务器（Navidrome/Subsonic）", L"Own server (Navidrome/Subsonic)", L"自前サーバー（Navidrome/Subsonic）", L"자체 서버 (Navidrome/Subsonic)", L"自建伺服器（Navidrome/Subsonic）" } },
+			{ { L"仅 30 秒试听 · 国内可用 · 免 Key", L"30-second previews · works in China · no key", L"30秒試聴のみ · 中国から利用可 · キー不要", L"30초 미리듣기 · 중국 내 사용 가능 · 키 불필요", L"僅 30 秒試聽 · 國內可用 · 免 Key" } },
+			{ { L"完整试听/下载 · 你自己的音乐库", L"Full playback / download · your own library", L"フル再生／DL可 · 自分のライブラリ", L"전체 재생/다운로드 · 내 음악 라이브러리", L"完整試聽／下載 · 你自己的音樂庫" } },
+			{ { L"服务器", L"Server", L"サーバー", L"서버", L"伺服器" } },
+			{ { L"在 [Music] 里填写 SubsonicUrl / SubsonicUser / SubsonicPassword 并保存", L"Set SubsonicUrl / SubsonicUser / SubsonicPassword under [Music] and save", L"[Music] に SubsonicUrl / SubsonicUser / SubsonicPassword を入力して保存", L"[Music]에 SubsonicUrl / SubsonicUser / SubsonicPassword를 입력하고 저장", L"在 [Music] 填寫 SubsonicUrl / SubsonicUser / SubsonicPassword 並儲存" } },
+			{ { L"当前来源", L"Current source", L"現在のソース", L"현재 소스", L"目前來源" } },
+			{ { L"仅列表，不可试听", L"List only, no playback", L"リストのみ（再生不可）", L"목록만 (재생 불가)", L"僅列表，不可試聽" } },
+			{ { L"可试听/下载 · 需 client_id", L"Play / download · needs client_id", L"再生／DL可 · client_id 必要", L"재생/다운로드 · client_id 필요", L"可試聽／下載 · 需 client_id" } },
+			{ { L"可试听/下载 · CC · 免 Key", L"Play / download · CC · no key", L"再生／DL可 · CC · キー不要", L"재생/다운로드 · CC · 키 불필요", L"可試聽／下載 · CC · 免 Key" } },
+			{ { L"可试听/下载 · CC · 免 Key · 有限速", L"Play / download · CC · no key · rate-limited", L"再生／DL可 · CC · キー不要 · 回数制限あり", L"재생/다운로드 · CC · 키 불필요 · 속도 제한", L"可試聽／下載 · CC · 免 Key · 有限速" } },
+			{ { L"刷新列表", L"Refresh list", L"リストを更新", L"목록 새로고침", L"重新整理列表" } },
+			{ { L"重新读取配置并重新加载当前音乐源的歌曲", L"Reload settings and fetch songs from the current source", L"設定を再読み込みして現在のソースの曲を取得", L"설정을 다시 읽고 현재 소스의 곡을 불러옵니다", L"重新讀取設定並重新載入目前來源的歌曲" } },
+			{ { L"已配置", L"Configured", L"設定済み", L"설정됨", L"已設定" } },
+			{ { L"未配置", L"Not configured", L"未設定", L"설정 안 됨", L"未設定" } },
+			{ { L"打开配置文件", L"Open config file", L"設定ファイルを開く", L"설정 파일 열기", L"開啟設定檔" } },
+			{ { L"打开", L"Open", L"開く", L"열기", L"開啟" } },
+			{ { L"重新读取", L"Reload", L"再読み込み", L"다시 읽기", L"重新讀取" } },
+			{ { L"改完配置文件后点右侧按钮生效", L"After editing, click the button to apply", L"編集後、右のボタンで反映します", L"수정 후 오른쪽 버튼을 눌러 적용", L"修改設定檔後按右側按鈕生效" } },
 			{ { L"语言", L"Language", L"言語", L"언어", L"語言" } },
 			{ { L"界面显示语言", L"Display language of the interface", L"表示言語を選択します", L"인터페이스 표시 언어", L"介面顯示語言" } },
 			{ { L"皮肤主题", L"Theme", L"テーマ", L"테마", L"外觀主題" } },
@@ -492,11 +517,32 @@ namespace YuMediaPlayer
 			m_pages[2].push_back(it);
 		}
 
-		// ---- 页 3：关于 ----
-		m_pages[3].push_back(info(Tr(L"YuMediaPlayer 版本"), m_version));
-		m_pages[3].push_back(info(Tr(L"配置文件"), IniPath()));
-		m_pages[3].push_back(button(Tr(L"检查更新"), Tr(L"查看是否有新版本"), Tr(L"立即检查"), ActCheckUpdate));
-		m_pages[3].push_back(button(Tr(L"恢复默认设置"), Tr(L"将所有设置恢复为初始值"), Tr(L"恢复默认"), ActReset));
+		// ---- 页 3：音乐源 ----（下标要和 OnlineMusic::Source 一致：0酷狗 1iTunes 2自建服务器）
+		m_pages[3].push_back(combo(Tr(L"音乐源"), Tr(L"在线歌曲的来源接口"), &m_settings.musicSource,
+			{ Tr(L"酷狗音乐（仅歌曲列表）"),
+			  Tr(L"iTunes 试听（国内可用）"), Tr(L"自建服务器（Navidrome/Subsonic）") }, 320));
+		{
+			static const wchar_t* kCaps[7] = { L"仅列表，不可试听", L"可试听/下载 · 需 client_id", L"可试听/下载 · CC · 免 Key",
+				L"可试听/下载 · CC · 免 Key", L"可试听/下载 · CC · 免 Key · 有限速",
+				L"仅 30 秒试听 · 国内可用 · 免 Key", L"完整试听/下载 · 你自己的音乐库" };
+			const int src = m_settings.musicSource < 0 ? 0 : (m_settings.musicSource > 6 ? 6 : m_settings.musicSource);
+			m_pages[3].push_back(info(Tr(L"当前来源"), Tr(kCaps[src])));
+			if (src == 1)   //
+			{
+			}
+			else if (src == 6)   // 自建服务器需要地址/账号
+			{
+				m_pages[3].push_back(info(Tr(L"服务器"), OnlineMusic::SourceCanPlay(6) ? Tr(L"已配置") : Tr(L"未配置")));
+				m_pages[3].push_back(button(Tr(L"打开配置文件"), Tr(L"在 [Music] 里填写 SubsonicUrl / SubsonicUser / SubsonicPassword 并保存"), Tr(L"打开"), ActOpenIni));
+			}
+		}
+		m_pages[3].push_back(button(Tr(L"刷新列表"), Tr(L"重新读取配置并重新加载当前音乐源的歌曲"), Tr(L"刷新列表"), ActReloadMusicSource));
+
+		// ---- 页 4：关于 ----
+		m_pages[4].push_back(info(Tr(L"YuMediaPlayer 版本"), m_version));
+		m_pages[4].push_back(info(Tr(L"配置文件"), IniPath()));
+		m_pages[4].push_back(button(Tr(L"检查更新"), Tr(L"查看是否有新版本"), Tr(L"立即检查"), ActCheckUpdate));
+		m_pages[4].push_back(button(Tr(L"恢复默认设置"), Tr(L"将所有设置恢复为初始值"), Tr(L"恢复默认"), ActReset));
 	}
 
 	// 计算每个设置项的行区域和控件区域（窗口大小固定，所以只需算一次）
@@ -547,6 +593,20 @@ namespace YuMediaPlayer
 		}
 	}
 
+	// 把当前音乐源 / client_id 同步给在线歌曲模块（OnlineMusic），这样不依赖外部回调也能生效
+	static void ApplyMusicBackend(const PlayerSettings& s)
+	{
+	
+		// 自建服务器：用户手动编辑 settings.ini 的 [Music]，每次都重新读
+		const std::wstring ini = IniPath();
+		wchar_t url[512] = { 0 }, user[128] = { 0 }, pass[128] = { 0 };
+		GetPrivateProfileStringW(L"Music", L"SubsonicUrl", L"", url, 512, ini.c_str());
+		GetPrivateProfileStringW(L"Music", L"SubsonicUser", L"", user, 128, ini.c_str());
+		GetPrivateProfileStringW(L"Music", L"SubsonicPassword", L"", pass, 128, ini.c_str());
+		OnlineMusic::SetSubsonic(url, user, pass);
+		OnlineMusic::SetSource(s.musicSource);
+	}
+
 	// ===================== 读写 settings.ini =====================
 	void SettingPage::Load()
 	{
@@ -574,12 +634,18 @@ namespace YuMediaPlayer
 		m_settings.musicFolder = folder;
 		m_lastMusicFolder = m_settings.musicFolder;
 
+		m_settings.musicSource = GetPrivateProfileIntW(L"Music", L"Source", d.musicSource, ini.c_str());
+
 		// 开机自启以注册表里的实际状态为准
 		m_settings.startWithWindows = IsAutoStartEnabled();
 		m_lastAutoStart = m_settings.startWithWindows;
 
 		m_settings.Clamp();
+		m_lastMusicSource = m_settings.musicSource;
+		ApplyMusicBackend(m_settings);
 		UITheme::SetMode(m_settings.theme);
+		BuildItems();      // "音乐源"页的 client_id 状态要跟着刷新
+		LayoutItems();
 		RebuildIfLanguageChanged();
 		if (m_hwnd)
 			InvalidateRect(m_hwnd, nullptr, FALSE);
@@ -606,6 +672,9 @@ namespace YuMediaPlayer
 
 		WriteInt(L"System", L"AutoCheckUpdate", m_settings.autoCheckUpdate ? 1 : 0, ini);
 		WritePrivateProfileStringW(L"System", L"MusicFolder", m_settings.musicFolder.c_str(), ini.c_str());
+
+		WriteInt(L"Music", L"Source", m_settings.musicSource, ini);
+		
 	}
 
 	const PlayerSettings& SettingPage::GetSettings() const
@@ -619,6 +688,8 @@ namespace YuMediaPlayer
 		m_settings.Clamp();
 		UITheme::SetMode(m_settings.theme);
 		m_lastMusicFolder = m_settings.musicFolder;   // 代码里设置的不触发回调
+		m_lastMusicSource = m_settings.musicSource;
+		ApplyMusicBackend(m_settings);
 		RebuildIfLanguageChanged();
 		if (m_settings.startWithWindows != m_lastAutoStart)
 		{
@@ -647,6 +718,11 @@ namespace YuMediaPlayer
 	void SettingPage::SetMusicFolderChangedCallback(std::function<void(const std::wstring&)> callback)
 	{
 		m_onMusicFolder = std::move(callback);
+	}
+
+	void SettingPage::SetMusicSourceChangedCallback(std::function<void()> callback)
+	{
+		m_onMusicSource = std::move(callback);
 	}
 
 	void SettingPage::SetVersionText(const wchar_t* text)
@@ -1170,6 +1246,15 @@ namespace YuMediaPlayer
 			if (m_onMusicFolder)
 				m_onMusicFolder(m_lastMusicFolder);
 		}
+		if (m_settings.musicSource != m_lastMusicSource)   // 音乐源变了：重新读 client_id，通知外部重新加载歌曲
+		{
+			m_lastMusicSource = m_settings.musicSource;
+			ApplyMusicBackend(m_settings);
+			BuildItems();
+			LayoutItems();
+			if (m_onMusicSource)
+				m_onMusicSource();
+		}
 		UITheme::SetMode(m_settings.theme);   // 主题变了：主窗口、迷你窗口、设置页一起重绘
 		if (m_onChanged)
 			m_onChanged(m_settings);
@@ -1193,6 +1278,33 @@ namespace YuMediaPlayer
 				m_settings.Reset();
 				NotifyChanged(true);
 			}
+			break;
+
+		case ActOpenIni:
+		{
+			const std::wstring ini = IniPath();
+			Save();   // 保证文件存在
+			wchar_t probe[32] = { 0 };
+
+			if (wcscmp(probe, L"<unset>") == 0)   // 第一次：先写一个空的键，用户打开就能看到该填哪里
+			for (const wchar_t* key : { L"SubsonicUrl", L"SubsonicUser", L"SubsonicPassword" })
+			{
+				GetPrivateProfileStringW(L"Music", key, L"<unset>", probe, 32, ini.c_str());
+				if (wcscmp(probe, L"<unset>") == 0)
+					WritePrivateProfileStringW(L"Music", key, L"", ini.c_str());
+			}
+			ShellExecuteW(m_hwnd, L"open", ini.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+			break;
+		}
+
+		case ActReloadMusicSource:
+			ApplyMusicBackend(m_settings);
+			BuildItems();
+			LayoutItems();
+			if (m_onMusicSource)
+				m_onMusicSource();
+			if (m_hwnd)
+				InvalidateRect(m_hwnd, nullptr, FALSE);
 			break;
 
 		case ActPickFolder:
@@ -1321,7 +1433,7 @@ namespace YuMediaPlayer
 		}
 
 		// ---- 左侧分类 ----
-		const wchar_t* kTabNames[kTabCount] = { Tr(L"通用"), Tr(L"界面"), Tr(L"系统"), Tr(L"关于") };
+		const wchar_t* kTabNames[kTabCount] = { Tr(L"通用"), Tr(L"界面"), Tr(L"系统"), Tr(L"音乐源"), Tr(L"关于") };
 		for (int i = 0; i < kTabCount; i++)
 		{
 			RECT r = NavItemRect(i);

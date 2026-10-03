@@ -23,7 +23,11 @@ namespace YuMediaPlayer
 		Playing,
 		Paused
 	};
-
+	enum class AudioSourceType {
+		KuGou = 0,     // 酷狗（仅列表，不可试听）
+		ITunes = 1,    // iTunes 试听
+		Subsonic = 2   // 自建服务器
+	};
 	class AudioPlayer
 	{
 	public:
@@ -32,10 +36,10 @@ namespace YuMediaPlayer
 
 		// 初始化 Media Foundation
 		bool Initialize();
-
+		void Shutdown();
 		// 打开并播放音频文件
 		bool Play(const std::wstring& filePath);
-
+		
 		// 暂停播放
 		bool Pause();
 
@@ -44,7 +48,7 @@ namespace YuMediaPlayer
 
 		// 停止播放
 		bool Stop();
-
+		bool IsPlaying() const { return m_isPlaying; }
 		// 获取播放状态
 		PlaybackState GetPlaybackState() const { return m_playbackState; }
 
@@ -83,6 +87,14 @@ namespace YuMediaPlayer
 		size_t DebugSizeOfSelf() const;
 
 	private:
+		HRESULT CreateTopology(const std::wstring& url, IMFTopology** ppTopology);
+		std::wstring ResolveFilePath(const std::wstring& path);
+
+		IMFMediaSession* m_pSession = nullptr;
+		IMFSourceResolver* m_pResolver = nullptr;
+		bool m_isPlaying = false;
+		bool m_isInitialized = false;
+
 		ComPtr<IMFMediaSession> m_mediaSession;
 		ComPtr<IMFMediaSource> m_mediaSource;
 		ComPtr<IMFTopology> m_topology;

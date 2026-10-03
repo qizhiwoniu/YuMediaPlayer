@@ -8,6 +8,12 @@
 #include "Core/Theme.h"
 #include "WindowGUI.h"
 #include "Core/SettingPage.h"
+#include <thread>
+#include <shlobj.h>
+#include <knownfolders.h>
+#pragma comment(lib, "shell32.lib")
+#pragma comment(lib, "ole32.lib")
+#include "OnlineMusic.h"   // 在线歌曲数据源（WinHTTP + iTunes Search）
 
 #pragma comment(lib, "dwmapi.lib")
 #ifndef EM_SETCUEBANNER
@@ -261,6 +267,39 @@ namespace YuMediaPlayer
 		const int kSearchHeight = 36;
 		const int kChipHeight = 30;
 		const int kSearchEditId = 1001;
+		const UINT kMsgOnlineResult = WM_APP + 2;   // 后台线程取完在线歌曲 -> 通知主窗口
+		// 后台线程 new 出来，主窗口收到消息后 delete
+		struct OnlineResult
+		{
+			int gen = 0;                   // 请求序号，过期的结果直接丢弃
+			bool ok = false;
+			std::wstring error;            // failure reason
+			std::vector<TrackItem> tracks;
+		};
+		const UINT kMsgTaskDone = WM_APP + 3;   // 试听缓存 / 下载歌曲 / 下载歌词 完成
+		struct TaskResult
+		{
+			int kind = 0;      // 0=试听 1=歌曲 2=歌词
+			int gen = 0;
+			bool ok = false;
+			std::wstring message;   // 失败原因
+			std::wstring file;      // 成功后的本地文件
+			TrackItem track;
+		};
+		// 默认下载目录：音乐\YuMediaPlayer
+		std::wstring GetDownloadDir(const std::wstring& custom)
+		{
+			if (!custom.empty())
+				return custom;
+			std::wstring dir = L".\\Downloads";
+			PWSTR p = nullptr;
+			if (SUCCEEDED(SHGetKnownFolderPath(FOLDERID_Music, 0, nullptr, &p)) && p)
+			{
+				dir = std::wstring(p) + L"\\YuMediaPlayer";
+				CoTaskMemFree(p);
+			}
+			return dir;
+		}
 		const UINT kMsgSearchSubmit = WM_APP + 1;   // 搜索框按回车 -> 通知主窗口
 		const float kPi = 3.14159265f;
 		WNDPROC g_oldEditProc = nullptr;
@@ -1459,7 +1498,7 @@ namespace YuMediaPlayer
 
 		if (list.empty())
 		{
-			const wchar_t* msg = (page == 0) ? L"\u8F93\u5165\u5173\u952E\u8BCD\u641C\u7D22\u6B4C\u66F2\uFF0C\u6216\u9009\u62E9\u4E0A\u65B9\u5206\u7C7B"
+			const wchar_t* msg = (page == 0 && !m_onlineStatus.empty()) ? m_onlineStatus.c_str() : (page == 0) ? L"\u8F93\u5165\u5173\u952E\u8BCD\u641C\u7D22\u6B4C\u66F2\uFF0C\u6216\u9009\u62E9\u4E0A\u65B9\u5206\u7C7B"
 				: (page == 1 ? L"\u6682\u65E0\u672C\u5730\u6B4C\u66F2" : L"\u8FD8\u6CA1\u6709\u559C\u6B22\u7684\u6B4C\u66F2\uFF0C\u70B9\u51FB\u6B4C\u66F2\u53F3\u4FA7\u7684\u7231\u5FC3\u5373\u53EF\u6536\u85CF");
 			drawText(msg, f15, dimGray, (float)m_listRect.left, (float)m_listRect.top,
 				(float)listW, (float)(listH > 160 ? 160 : listH), fmtCenter);
@@ -1608,8 +1647,159 @@ namespace YuMediaPlayer
 		wchar_t buf[256] = { 0 };
 		if (m_searchEdit)
 			GetWindowTextW(m_searchEdit, buf, 256);
+		SearchOnline(buf);          // 去互联网搜歌，结果自动显示在乐馆列表
 		if (m_onSearch)
 			m_onSearch(buf);
+	}
+
+	// ---------------- 在线试听 / 下载 ----------------
+	void WindowGUI::SetOnlineAudioReadyCallback(std::function<void(const TrackItem&, const std::wstring&)> callback) { m_onOnlineAudioReady = std::move(callback); }
+	void WindowGUI::SetOnlineMessageCallback(std::function<void(const std::wstring&)> callback) { m_onOnlineMessage = std::move(callback); }
+	void WindowGUI::SetDownloadDir(const std::wstring& dir) { m_downloadDir = dir; }
+
+	// important=true：没有设置消息回调时也要弹框告诉用户（结果/错误）；false：只是进度，没回调就不提示
+	void WindowGUI::Notify(const std::wstring& msg, bool important)
+	{
+		if (m_onOnlineMessage)
+		{
+			m_onOnlineMessage(msg);
+			return;
+		}
+		if (important)
+			MessageBoxW(m_hwnd, msg.c_str(), L"YuMediaPlayer", MB_OK | MB_ICONINFORMATION);
+	}
+
+	void WindowGUI::PlayTrackItem(int page, int row, const TrackItem& track)
+	{
+		if (!track.streamUrl.empty())
+		{
+			RunTrackTask(0, page, track);   // 在线歌曲：缓存整首 -> 回调给外部播放
+			return;
+		}
+		if (page == 0)
+		{
+			Notify(OnlineMusic::GetSource() == OnlineMusic::SourceKugou
+				? L"\u5F53\u524D\u6570\u636E\u6E90\uFF08\u9177\u72D7\uFF09\u53EA\u63D0\u4F9B\u6B4C\u66F2\u5217\u8868\uFF0C\u4E0D\u63D0\u4F9B\u64AD\u653E/\u4E0B\u8F7D\u5730\u5740\u3002\n\u8BF7\u5230 \u8BBE\u7F6E \u2192 \u97F3\u4E50\u6E90\uFF0C\u5207\u6362\u5230 Internet Archive / ccMixter / Openverse / Jamendo\uFF0C\u518D\u70B9\u201C\u5237\u65B0\u5217\u8868\u201D\u3002"
+				: L"\u8FD9\u9996\u6B4C\u6CA1\u6709\u53EF\u7528\u7684\u64AD\u653E\u5730\u5740\uFF0C\u6362\u4E00\u9996\u8BD5\u8BD5\uFF0C\u6216\u70B9\u8BBE\u7F6E\u91CC\u7684\u201C\u5237\u65B0\u5217\u8868\u201D\u91CD\u65B0\u52A0\u8F7D\u3002", true);
+			return;
+		}
+		if (m_onTrackActivate)
+			m_onTrackActivate(page, row);   // 本地 / 喜欢里的本地歌曲，照旧交给外部
+	}
+
+	void WindowGUI::RunTrackTask(int kind, int page, TrackItem track)
+	{
+		(void)page;
+		if (!m_hwnd)
+			return;
+		HWND hwnd = m_hwnd;
+		const int gen = (kind == 0) ? ++m_audioGen : 0;
+
+		std::wstring dir = GetDownloadDir(m_downloadDir);
+		std::wstring base;   // 歌词文件名（空 = "歌手 - 歌名"）
+		if (kind == 2 && track.streamUrl.empty() && !track.path.empty()
+			&& GetFileAttributesW(track.path.c_str()) != INVALID_FILE_ATTRIBUTES)
+		{
+			// 本地歌曲：歌词存到歌曲所在目录，和歌曲同名
+			size_t sep = track.path.find_last_of(L"\\/");
+			if (sep != std::wstring::npos)
+			{
+				dir = track.path.substr(0, sep);
+				std::wstring name = track.path.substr(sep + 1);
+				size_t dot = name.find_last_of(L'.');
+				base = (dot == std::wstring::npos) ? name : name.substr(0, dot);
+			}
+		}
+
+		if (kind == 0)      Notify(L"\u6B63\u5728\u7F13\u51B2\uFF1A" + track.title + L" ...", false);
+		else if (kind == 1) Notify(L"\u5F00\u59CB\u4E0B\u8F7D\uFF1A" + track.title + L" ...", false);
+		else                Notify(L"\u6B63\u5728\u83B7\u53D6\u6B4C\u8BCD\uFF1A" + track.title + L" ...", false);
+
+		std::thread([hwnd, kind, gen, track, dir, base]()
+		{
+			TaskResult* r = new TaskResult();
+			r->kind = kind;
+			r->gen = gen;
+			r->track = track;
+			std::wstring err;
+			if (kind == 0)      r->ok = OnlineMusic::CacheAudio(track, r->file, &err);
+			else if (kind == 1) r->ok = OnlineMusic::DownloadSong(track, dir, r->file, &err);
+			else                r->ok = OnlineMusic::DownloadLyrics(track, dir, base, r->file, &err);
+			r->message = err;
+			if (!IsWindow(hwnd) || !PostMessageW(hwnd, kMsgTaskDone, 0, (LPARAM)r))
+				delete r;
+		}).detach();
+	}
+
+	void WindowGUI::ShowTrackMenu(POINT clientPt, int page, int row)
+	{
+		const TrackItem* src = GetTrack(page, row);
+		if (!src || !m_hwnd)
+			return;
+		const TrackItem track = *src;   // 菜单是模态的，期间列表可能被刷新，所以先复制一份
+		const bool online = (page == 0) || !track.streamUrl.empty();
+
+		HMENU menu = CreatePopupMenu();
+		AppendMenuW(menu, MF_STRING, 1, L"\u64AD\u653E / \u8BD5\u542C");
+		if (online)
+			AppendMenuW(menu, MF_STRING | (track.downloadUrl.empty() ? MF_GRAYED : 0), 2,
+				track.downloadUrl.empty() ? L"\u4E0B\u8F7D\u6B4C\u66F2\uFF08\u4E0D\u53EF\u4E0B\u8F7D\uFF09" : L"\u4E0B\u8F7D\u6B4C\u66F2");
+		AppendMenuW(menu, MF_STRING, 3, L"\u4E0B\u8F7D\u6B4C\u8BCD");
+
+		POINT sp = clientPt;
+		ClientToScreen(m_hwnd, &sp);
+		SetForegroundWindow(m_hwnd);
+		const int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_RIGHTBUTTON, sp.x, sp.y, 0, m_hwnd, nullptr);
+		PostMessageW(m_hwnd, WM_NULL, 0, 0);
+		DestroyMenu(menu);
+
+		if (cmd == 1)      PlayTrackItem(page, row, track);
+		else if (cmd == 2) RunTrackTask(1, page, track);
+		else if (cmd == 3) RunTrackTask(2, page, track);
+	}
+
+	// ---------------- 在线歌曲：异步获取 ----------------
+	void WindowGUI::StartOnlineQuery(const std::wstring& keyword)
+	{
+		if (!m_hwnd)
+			return;
+		m_onlineStatus = L"\u6B63\u5728\u52A0\u8F7D\u6B4C\u66F2...";
+		InvalidateRect(m_hwnd, &m_listRect, FALSE);
+		const int gen = ++m_onlineGen;   // 新请求作废所有旧请求
+		HWND hwnd = m_hwnd;
+		std::thread([hwnd, gen, keyword]()
+		{
+			OnlineResult* r = new OnlineResult();
+			r->gen = gen;
+			r->ok = OnlineMusic::Search(keyword, 50, r->tracks, &r->error);
+			if (!IsWindow(hwnd) || !PostMessageW(hwnd, kMsgOnlineResult, 0, (LPARAM)r))
+				delete r;
+		}).detach();
+	}
+
+	void WindowGUI::SearchOnline(const std::wstring& keyword)
+	{
+		size_t b = keyword.find_first_not_of(L" \t\r\n");
+		if (b == std::wstring::npos)
+		{
+			// 搜索框是空的：回到当前分类的推荐列表
+			LoadOnlineCategory(m_categorySelected);
+			return;
+		}
+		size_t e = keyword.find_last_not_of(L" \t\r\n");
+		StartOnlineQuery(keyword.substr(b, e - b + 1));
+	}
+
+	void WindowGUI::LoadOnlineCategory(int index)
+	{
+		if (index < 0 || index >= (int)m_categories.size())
+			return;
+		StartOnlineQuery(OnlineMusic::CategoryKeyword(m_categories[index]));
+	}
+
+	void WindowGUI::LoadOnlineHome()
+	{
+		LoadOnlineCategory(m_categorySelected);
 	}
 
 	int WindowGUI::HitTestRow(POINT pt) const
@@ -1693,6 +1883,7 @@ namespace YuMediaPlayer
 				{
 					m_categorySelected = (int)i;
 					InvalidateRect(m_hwnd, &m_contentRect, FALSE);
+					LoadOnlineCategory((int)i);   // 切分类 -> 重新取该分类的歌
 					if (m_onCategory)
 						m_onCategory((int)i, m_categories[i]);
 					return true;
@@ -1806,6 +1997,7 @@ namespace YuMediaPlayer
 		{
 			RefreshLayout();
 			InvalidateRect(m_hwnd, &m_contentRect, FALSE);
+			LoadOnlineHome();   // categories changed: reload online tracks
 		}
 	}
 	void WindowGUI::SetSearchCallback(std::function<void(const std::wstring&)> callback) { m_onSearch = std::move(callback); }
@@ -1899,6 +2091,70 @@ namespace YuMediaPlayer
 		case kMsgSearchSubmit:
 			SubmitSearch();
 			return 0;
+		case kMsgTaskDone:
+		{
+			std::unique_ptr<TaskResult> r(reinterpret_cast<TaskResult*>(lParam));
+			if (!r)
+				return 0;
+			if (r->kind == 0)
+			{
+				if (r->gen != m_audioGen)
+					return 0;   // 中途又点了别的歌，这首丢掉
+				if (!r->ok)
+					Notify(L"\u8BD5\u542C\u5931\u8D25\uFF1A" + r->message, true);
+				else if (m_onOnlineAudioReady)
+					m_onOnlineAudioReady(r->track, r->file);
+				else
+				{
+					// 外部没有接 SetOnlineAudioReadyCallback：把缓存好的文件当成"本地歌曲"加到本地列表末尾，
+					// 然后走本地歌曲的双击回调（m_onTrackActivate），这样就在你自己的播放器里播放。
+					if (m_onTrackActivate)
+					{
+						TrackItem t = r->track;
+						t.path = r->file;
+						t.streamUrl.clear();
+						t.downloadUrl.clear();
+						int row = -1;
+						for (size_t i = 0; i < m_tracks[1].size(); i++)
+							if (_wcsicmp(m_tracks[1][i].path.c_str(), t.path.c_str()) == 0) { row = (int)i; break; }
+						if (row < 0)
+						{
+							m_tracks[1].push_back(t);
+							row = (int)m_tracks[1].size() - 1;
+							InvalidateRect(m_hwnd, &m_listRect, FALSE);
+						}
+						m_onTrackActivate(1, row);
+					}
+					else
+						ShellExecuteW(m_hwnd, L"open", r->file.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+				}
+			}
+			else if (r->ok)
+				Notify((r->kind == 1 ? L"\u6B4C\u66F2\u5DF2\u4FDD\u5B58\uFF1A" : L"\u6B4C\u8BCD\u5DF2\u4FDD\u5B58\uFF1A") + r->file, true);
+			else
+				Notify((r->kind == 1 ? L"\u4E0B\u8F7D\u6B4C\u66F2\u5931\u8D25\uFF1A" : L"\u4E0B\u8F7D\u6B4C\u8BCD\u5931\u8D25\uFF1A") + r->message, true);
+			return 0;
+		}
+		case kMsgOnlineResult:
+		{
+			std::unique_ptr<OnlineResult> r(reinterpret_cast<OnlineResult*>(lParam));
+			// 只接受最新一次请求的结果；失败时保留当前列表不动
+			if (r && r->gen == m_onlineGen)
+			{
+				if (r->ok)
+				{
+					m_onlineStatus = r->tracks.empty() ? L"\u6CA1\u6709\u627E\u5230\u76F8\u5173\u6B4C\u66F2" : L"";
+					SetOnlineTracks(std::move(r->tracks));
+				}
+				else
+				{
+					// 失败：清空列表，把原因直接显示在列表区域
+					m_onlineStatus = L"\u52A0\u8F7D\u5931\u8D25\uFF1A" + r->error;
+					SetOnlineTracks(std::vector<TrackItem>());
+				}
+			}
+			return 0;
+		}
 		case WM_LBUTTONDOWN:
 		{
 			// 点搜索框区域 -> 输入框拿焦点；点别处 -> 主窗口拿焦点（输入框失焦）
@@ -1945,11 +2201,30 @@ namespace YuMediaPlayer
 				{
 					m_selectedRow[m_sidebarSelected] = row;
 					InvalidateRect(hwnd, &m_listRect, FALSE);
-					if (m_onTrackActivate)
-						m_onTrackActivate(m_sidebarSelected, row);
+					if (const TrackItem* t = GetTrack(m_sidebarSelected, row))
+					{
+						const TrackItem copy = *t;
+						PlayTrackItem(m_sidebarSelected, row, copy);   // 在线歌曲走试听；本地歌曲仍然回调外部
+					}
 				}
 			}
 			return 0;
+		}
+		case WM_RBUTTONUP:
+		{
+			// 右键歌曲 -> 弹出菜单（播放 / 下载歌曲 / 下载歌词）
+			POINT pt;
+			pt.x = GET_X_LPARAM(lParam);
+			pt.y = GET_Y_LPARAM(lParam);
+			const int row = HitTestRow(pt);
+			if (row >= 0)
+			{
+				m_selectedRow[m_sidebarSelected] = row;
+				InvalidateRect(hwnd, &m_listRect, FALSE);
+				ShowTrackMenu(pt, m_sidebarSelected, row);
+				return 0;
+			}
+			break;
 		}
 		case WM_MOUSEWHEEL:
 		{
@@ -2453,6 +2728,9 @@ namespace YuMediaPlayer
 		// 步骤 4：显示窗口
 		ShowWindow(m_hwnd, SW_SHOW);
 		UpdateWindow(m_hwnd);
+
+		// 自动从互联网获取乐馆首页歌曲
+		LoadOnlineHome();
 
 		return true;
 	}

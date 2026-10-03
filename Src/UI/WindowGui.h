@@ -18,6 +18,8 @@ namespace YuMediaPlayer
 		int durationSeconds = 0;
 		bool favorite = false;
 		std::wstring path;      // 本地文件路径，或在线歌曲 id，外部自己约定
+		std::wstring streamUrl;     // 在线歌曲的完整播放地址（空 = 不能在线试听）
+		std::wstring downloadUrl;   // 在线歌曲的下载地址（空 = 作者不允许下载）
 	};
 
 	class SettingPage;   // 设置页（完整定义在 Core/SettingPage.h）
@@ -100,6 +102,17 @@ namespace YuMediaPlayer
 		void SetSeekCallback(std::function<void(float)> callback);
 		// 正在拖动进度条（此时 SetProgress 不会覆盖拖动预览）
 		bool IsSeeking() const { return m_seeking; }
+		// ---- 在线歌曲（异步，不会卡界面；结果自动显示在乐馆列表）----
+		void SearchOnline(const std::wstring& keyword);   // 搜索互联网歌曲；keyword 为空则加载当前分类
+		void LoadOnlineCategory(int index);               // 加载某个分类的歌曲
+		void LoadOnlineHome();                            // 加载当前分类（首页）
+		// ---- 在线试听 / 下载（右键菜单：播放、下载歌曲、下载歌词）----
+		// 双击/右键"播放"一首在线歌曲后，整首歌缓存完成时回调；localFile 是本地 mp3，按播放本地歌曲的方式播放即可
+		void SetOnlineAudioReadyCallback(std::function<void(const TrackItem&, const std::wstring&)> callback);
+		// 接收进度/结果提示（比如显示成 toast）。不设置的话，成功/失败结果会用消息框提示
+		void SetOnlineMessageCallback(std::function<void(const std::wstring&)> callback);
+		// 下载目录，默认 "音乐\YuMediaPlayer"
+		void SetDownloadDir(const std::wstring& dir);
 		// 设置页：由 WindowGUI 持有（第一次调用时创建，构造时会自己读 settings.ini）
 		SettingPage& GetSettingPage();
 
@@ -121,6 +134,11 @@ namespace YuMediaPlayer
 		void ScrollList(int deltaPixels);     // 滚动当前页列表
 		int  HitTestRow(POINT pt) const;      // 命中当前页的第几行，没有返回 -1
 		void SetTracksInternal(int page, std::vector<TrackItem> tracks);   // 三个 SetXxxTracks 共用
+		void StartOnlineQuery(const std::wstring& keyword);   // 起后台线程取数据
+		void PlayTrackItem(int page, int row, const TrackItem& track);   // 双击 / 菜单"播放"
+		void RunTrackTask(int kind, int page, TrackItem track);          // kind: 0=缓存试听 1=下载歌曲 2=下载歌词（后台线程）
+		void ShowTrackMenu(POINT clientPt, int page, int row);           // 右键菜单
+		void Notify(const std::wstring& msg, bool important);
 	private:
 		// 窗口
 		HWND						  m_hwnd;
@@ -212,5 +230,13 @@ namespace YuMediaPlayer
 		std::unique_ptr<Gdiplus::Image> m_coverImage;
 
 		std::unique_ptr<SettingPage> m_settingPage;
+
+		std::wstring m_onlineStatus;   // 乐馆列表为空时显示的提示（加载中 / 失败原因 / 无结果）
+		std::function<void(const TrackItem&, const std::wstring&)> m_onOnlineAudioReady;
+		std::function<void(const std::wstring&)> m_onOnlineMessage;
+		std::wstring m_downloadDir;
+		int m_audioGen = 0;    // 试听请求序号，只播最后一次点的那首
+		int m_onlineGen = 0;   // 在线请求序号（只在 UI 线程读写），用来丢弃过期结果
+
 	};
 }
