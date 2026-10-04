@@ -16,7 +16,7 @@ namespace YuMediaPlayer
 	{
 		namespace
 		{
-			static int g_source = SourceKugou;
+			static int g_source = SourceItunes;   // 默认 iTunes（可试听）；酷狗只有列表
 			static std::wstring g_subUrl;
 			static std::wstring g_subUser;
 			static std::wstring g_subPass;
@@ -502,7 +502,7 @@ namespace YuMediaPlayer
 		{
 			g_subUrl = url; g_subUser = user; g_subPass = password;
 		}
-		void SetSource(int source) { g_source = (source >= 0 && source < SourceCount) ? source : (int)SourceKugou; }
+		void SetSource(int source) { g_source = (source >= 0 && source < SourceCount) ? source : (int)SourceItunes; }
 		int  GetSource() { return g_source; }
 		bool SourceCanPlay(int source)
 		{
@@ -546,23 +546,43 @@ namespace YuMediaPlayer
 			return true;
 		}
 
-		bool CacheAudio(const TrackItem& track, std::wstring& localFile, std::wstring* error)
+		std::wstring CachePathFor(const TrackItem& track)
 		{
-			if (track.streamUrl.empty())
+			wchar_t tmp[MAX_PATH] = {};
+			GetTempPathW(MAX_PATH, tmp);
+			std::wstring dir = std::wstring(tmp) + L"YuMediaPlayer\\cache";
+			return dir + L"\\" + SanitizeFileName(track.path.empty() ? track.title : track.path) + AudioExtFor(track.streamUrl);
+		}
+
+		bool CacheToFile(const std::wstring& url, const std::wstring& file, std::wstring* error)
+		{
+			if (url.empty())
 			{
 				if (error) *error = L"这首歌没有可用的播放地址";
 				return false;
 			}
-			wchar_t tmp[MAX_PATH] = {};
-			GetTempPathW(MAX_PATH, tmp);
-			std::wstring dir = std::wstring(tmp) + L"YuMediaPlayer\\cache";
-			EnsureDir(dir);
-			std::wstring file = dir + L"\\" + SanitizeFileName(track.path.empty() ? track.title : track.path) + AudioExtFor(track.streamUrl);
+			const size_t sep = file.find_last_of(L"\\/");
+			if (sep != std::wstring::npos)
+				EnsureDir(file.substr(0, sep));
+			OutputDebugStringW((L"[Online] CacheToFile url=" + url + L" -> " + file + L"\n").c_str());
 			if (!FileNotEmpty(file))
 			{
-				if (!DownloadAtomic(track.streamUrl, file, error))
+				if (!DownloadAtomic(url, file, error))
 					return false;
 			}
+			if (!FileNotEmpty(file))
+			{
+				if (error) *error = L"\u7F13\u5B58\u6587\u4EF6\u4E3A\u7A7A\uFF1A" + file;
+				return false;
+			}
+			return true;
+		}
+
+		bool CacheAudio(const TrackItem& track, std::wstring& localFile, std::wstring* error)
+		{
+			const std::wstring file = CachePathFor(track);
+			if (!CacheToFile(track.streamUrl, file, error))
+				return false;
 			localFile = file;
 			return true;
 		}

@@ -127,6 +127,17 @@ namespace YuMediaPlayer
 		void SyncMainWindowPlayer();      // 迷你窗口 -> 主窗口：歌名/歌手/播放状态/进度
 		void SeekToRatio(float ratio);
 
+		// ── 在线播放列表（乐馆）────────────────────────────────────
+		// 在乐馆里播放一首歌后，播放列表从"本地"换成乐馆当前这一屏的在线歌曲（上一曲/下一曲/列表面板都跟着走）；
+		// 在线歌曲没缓存到本地的，切到它时先后台缓存再播。双击"本地/喜欢"页的歌曲时换回本地列表。
+		void ApplyOnlinePlaylist(const TrackItem& clicked, const std::wstring& file);
+		void RestoreLocalPlaylist();
+		void StartOnlineCache(int index);
+		bool m_onlineMode = false;                 // 当前播放列表是不是在线列表
+		std::vector<Track> m_savedLocalTracks;     // 切到在线列表前的本地列表（回本地时还原）
+		std::wstring m_savedLocalCurrentPath;
+		int m_onlineGen = 0;                       // 在线缓存请求序号，过期的结果丢弃
+
 		// ── 喜欢列表 ────────────────────────────────────────────────
 		// 统一入口：迷你窗口的心形按钮、主窗口列表里的爱心，都走这里。
 		// favorite=true 加入喜欢列表，false 从喜欢列表移除；同步两个窗口的心形、"喜欢"页，并存盘（favorites.txt）。

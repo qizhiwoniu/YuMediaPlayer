@@ -3,6 +3,8 @@
 #include "TrayIcon.h"
 #include "Core/AudioPlayer.h"
 #include "Core/Theme.h"   // UITheme：深色/浅色主题
+#include "Core/SettingPage.h"   // 右键菜单"打开桌面歌词"要改设置并保存
+#include "DesktopLyric.h"
 #include <algorithm>
 #include <cmath>
 #include <mmdeviceapi.h>   // 静音：Core Audio（音频会话音量）
@@ -359,8 +361,21 @@ namespace YuMediaPlayer
 			break;
 		}
 		case ContextMenuCommand::MenuItem3:
-			// 打开桌面歌词
+		{
+			// 打开 / 关闭桌面歌词：改 lyricEnabled 并保存，设置页的"显示桌面歌词"开关会同步，
+			// SetSettings 内部会让 DesktopLyric 显示或隐藏
+			if (windowGUI)
+			{
+				SettingPage& page = windowGUI->GetSettingPage();
+				PlayerSettings s = page.GetSettings();
+				s.lyricEnabled = !DesktopLyric::Instance().IsVisible();
+				page.SetSettings(s);
+				page.Save();
+			}
+			else
+				DesktopLyric::Instance().Toggle();
 			break;
+		}
 
 		case ContextMenuCommand::MenuItem4:
 			// 歌词/歌曲，反馈

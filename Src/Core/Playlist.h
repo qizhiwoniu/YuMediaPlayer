@@ -11,6 +11,9 @@ namespace YuMediaPlayer
 		std::wstring title;      // 歌名（"周杰伦-七里香.mp3" -> "七里香"）
 		std::wstring artist;     // 歌手（"周杰伦-七里香.mp3" -> "周杰伦"），文件名里没有 '-' 时为空
 		std::wstring coverPath;  // 封面图完整路径；没找到同名图片时为空（界面会显示黑胶占位）
+		// 在线歌曲才有：试听地址。非空表示这是乐馆的在线歌曲，audioPath 是它的缓存文件路径
+		// （可能还没下载，播放前 MainWindow 会先在后台缓存）。本地歌曲这里永远为空。
+		std::wstring streamUrl;
 	};
 
 	// 播放列表：只负责"有哪些歌、当前是哪一首、上一首/下一首是哪一首"，

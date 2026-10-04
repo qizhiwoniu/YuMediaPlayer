@@ -34,6 +34,17 @@ namespace YuMediaPlayer
 		bool autoCheckUpdate = true;    // 启动时自动检查更新
 		std::wstring musicFolder;       // 本地音乐目录，空=未设置
 
+		// ---- 桌面歌词（设置页"歌词"）----
+		bool lyricEnabled = false;      // 是否显示桌面歌词
+		bool lyricLocked = false;       // 锁定歌词（鼠标穿透，不能拖动）
+		std::wstring lyricFontName;     // 歌词字体名，空=默认的"胡敬礼"字体
+		int  lyricFontSize = 30;        // 歌词字号（pt）6~72
+		int  lyricColorMode = 0;        // 0=黄色 1=七彩（颜色流动变化）
+		int  lyricRainbowSpeed = 5;     // 七彩变化速度 1~10
+		bool lyricHasPos = false;       // 是否记住了窗口位置
+		int  lyricX = 0;                // 歌词窗口左上角（屏幕坐标）
+		int  lyricY = 0;
+
 		// ---- 音乐源（设置页"音乐源"）----
 		int  musicSource = 1;           // 0=酷狗(仅列表) 1=iTunes(30秒试听) 2=自建Subsonic服务器
 		std::wstring jamendoClientId;   // Jamendo 的 client_id，写在 settings.ini 的 [Music] JamendoClientId（程序不会覆盖它）
@@ -42,7 +53,7 @@ namespace YuMediaPlayer
 		void Clamp();                   // 把各字段限制在合法范围内
 	};
 
-	// 设置页：一个独立的深色圆角弹出窗口，左侧分类（播放/界面/系统/关于），右侧是各设置项。
+	// 设置页：一个独立的深色圆角弹出窗口，左侧分类（通用/界面/系统/歌词/音乐源/关于），右侧是各设置项。
 	// 设置保存在 exe 同目录的 settings.ini，改动即时生效并自动保存。
 	class SettingPage
 	{
@@ -81,7 +92,7 @@ namespace YuMediaPlayer
 		void SetVersionText(const wchar_t* text);
 
 	private:
-		enum { kTabCount = 5 };   // 通用 / 界面 / 系统 / 音乐源 / 关于
+		enum { kTabCount = 6 };   // 通用 / 界面 / 系统 / 歌词 / 音乐源 / 关于
 		enum ItemType { ItemToggle, ItemSlider, ItemChoice, ItemButton, ItemInfo, ItemCombo };
 		enum Action { ActNone, ActCheckUpdate, ActReset, ActPickFolder, ActOpenIni, ActReloadMusicSource };
 		enum HitKind { HitNone, HitClose, HitNav, HitItem, HitComboList };

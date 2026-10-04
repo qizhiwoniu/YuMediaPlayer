@@ -11,9 +11,11 @@
 #include <set>
 #include <string>
 #include <shobjidl.h>   // IShellItemImageFactory：读取音频内嵌封面
+#include <thread>
 #include "Core/Theme.h"
 #include "UI/WindowGUI.h"
 #include "UI/miniWindowGUI.h"
+#include "UI/OnlineMusic.h"   // 在线歌曲缓存（如果 OnlineMusic.h 不在 UI 目录，按实际位置改）
 #include "NotifyIcon/TrayIcon.h"
 #include "Core/AudioPlayer.h"
 #include "Core/Playlist.h"
@@ -57,6 +59,24 @@ namespace YuMediaPlayer
 	// AudioPlayer 在 MF 工作线程上收到 MESessionEnded 后，用 PostMessage 发给主窗口的消息。
 	// wParam = 那首歌的编号（AudioPlayer::GetTrackGeneration），用来丢弃过期通知。
 	static constexpr UINT WM_YU_TRACK_ENDED = WM_APP + 1;
+
+	// 在线歌曲后台缓存完成 -> 通知主窗口（lParam = new 出来的 OnlineCacheResult，主窗口收到后 delete）
+	static constexpr UINT WM_YU_ONLINE_CACHED = WM_APP + 77;
+	struct OnlineCacheResult
+	{
+		int gen = 0;
+		int index = -1;
+		bool ok = false;
+		std::wstring error;
+		std::wstring file;
+	};
+	static bool IsCachedFileReady(const std::wstring& path)
+	{
+		WIN32_FILE_ATTRIBUTE_DATA d = {};
+		return GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &d)
+			&& !(d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
+			&& (d.nFileSizeHigh != 0 || d.nFileSizeLow != 0);
+	}
 
 	static PlaylistPanel s_playlistPanel;   // 展开式播放列表面板
 	static int  s_panelExtraH = 0;          // 面板展开时窗口比"播放器本体"多出的高度；0 = 没展开
@@ -818,7 +838,7 @@ namespace YuMediaPlayer
 			{
 				// 切换当前这首歌的收藏状态，然后重绘（分层窗口必须手动 Composite，
 				// 否则心形不会跟着变）。
-				if (const Track* favTrack = m_playlist.Current())
+				if (const Track* favTrack = m_onlineMode ? nullptr : m_playlist.Current())   // 在线歌曲是临时缓存，不收藏
 				{
 					// 翻转后的新状态：之前没收藏 -> 现在收藏。
 					// 同时更新主窗口"喜欢"页（加入/移除）和本地列表里的爱心。
@@ -1007,6 +1027,23 @@ namespace YuMediaPlayer
 				return 0;
 			}
 			break;
+		}
+		case WM_YU_ONLINE_CACHED:
+		{
+			std::unique_ptr<OnlineCacheResult> r(reinterpret_cast<OnlineCacheResult*>(lParam));
+			if (!r || r->gen != m_onlineGen)
+				return 0;   // 缓存期间又点了别的歌 / 换回了本地列表，这首丢掉
+			const Track* t = m_playlist.At(r->index);
+			if (!m_onlineMode || !t || t->audioPath != r->file)
+				return 0;
+			if (!r->ok)
+			{
+				OutputDebugStringW((L"[Online] 缓存失败：" + r->error + L"\n").c_str());
+				MessageBoxW(m_hwnd, (L"在线歌曲缓冲失败：" + r->error).c_str(), L"YuMediaPlayer", MB_OK | MB_ICONWARNING);
+				return 0;
+			}
+			PlayTrack(r->index);   // 这次文件已经在本地了，走正常切歌流程（淡入淡出、封面、同步都照常）
+			return 0;
 		}
 		case WM_YU_TRACK_ENDED:
 		{
@@ -1886,7 +1923,7 @@ namespace YuMediaPlayer
 				if (s_cardHovered || s_playlistPanel.IsOpen())
 				{
 					// 当前这首是否已收藏 -> 决定收藏按钮画实心红心还是空心描边心
-					if (const Track* favTrack = m_playlist.Current())
+					if (const Track* favTrack = m_onlineMode ? nullptr : m_playlist.Current())
 						buttonsInfo.heart.active = (s_favorites.count(favTrack->audioPath) > 0);
 					else
 						buttonsInfo.heart.active = false;
@@ -2069,6 +2106,18 @@ namespace YuMediaPlayer
 	// 头像旋转状态（右键菜单里的"旋转"）不受影响：正在转就继续转，只是换了张封面。
 	void MainWindow::PlayTrack(int index)
 	{
+		// 在线播放列表里还没缓存到本地的歌：先后台缓存，缓存好了（WM_YU_ONLINE_CACHED）再回到这里真正切歌。
+		// 缓存期间当前这首继续播放，不会先断声。
+		if (index >= 0 && index < m_playlist.Count())
+		{
+			const Track* ot = m_playlist.At(index);
+			if (ot && !ot->streamUrl.empty() && !IsCachedFileReady(ot->audioPath))
+			{
+				StartOnlineCache(index);
+				return;
+			}
+		}
+
 		// 开了淡入淡出、而且正在播放：先把当前这首淡出，淡出完成后（FadeTick）再真正切歌
 		if (!s_bypassFade && m_windowGUI)
 		{
@@ -2133,6 +2182,124 @@ namespace YuMediaPlayer
 
 		Composite();
 		SyncMainWindowPlayer();   // 主窗口同步显示新歌
+	}
+
+	// 后台缓存第 index 首在线歌曲。
+	void MainWindow::StartOnlineCache(int index)
+	{
+		const Track* t = m_playlist.At(index);
+		if (!t || t->streamUrl.empty())
+			return;
+
+		const int gen = ++m_onlineGen;
+		const HWND hwnd = m_hwnd;
+		const std::wstring url = t->streamUrl;
+		const std::wstring file = t->audioPath;
+		OutputDebugStringW((L"[Online] 缓冲：" + t->title + L"\n").c_str());
+
+		// 迷你窗口先显示"缓冲中"，让人知道点击有反应（缓存好后 ApplyTrackToUi 会换成这首的信息）
+		m_trackTitle = L"缓冲中… " + t->title;
+		m_trackArtist = t->artist;
+		Composite();
+
+		std::thread([hwnd, gen, index, url, file]()
+			{
+				OnlineCacheResult* r = new OnlineCacheResult();
+				r->gen = gen;
+				r->index = index;
+				r->file = file;
+				r->ok = OnlineMusic::CacheToFile(url, file, &r->error);
+				if (!IsWindow(hwnd) || !PostMessageW(hwnd, WM_YU_ONLINE_CACHED, 0, (LPARAM)r))
+					delete r;
+			}).detach();
+	}
+
+	// 乐馆里播放了一首歌（已缓存到 file）：把播放列表换成乐馆当前这一屏的在线歌曲，并播放点击的这首。
+	void MainWindow::ApplyOnlinePlaylist(const TrackItem& clicked, const std::wstring& file)
+	{
+		if (!m_windowGUI)
+			return;
+
+		// 第一次从本地切到在线：先备份本地列表，之后双击本地歌曲时还原
+		if (!m_onlineMode)
+		{
+			m_savedLocalTracks.clear();
+			for (int i = 0; i < m_playlist.Count(); i++)
+				if (const Track* lt = m_playlist.At(i))
+					m_savedLocalTracks.push_back(*lt);
+			if (const Track* cur = m_playlist.Current())
+				m_savedLocalCurrentPath = cur->audioPath;
+			else
+				m_savedLocalCurrentPath.clear();
+		}
+
+		// 乐馆当前列表 -> 在线播放列表（只收有试听地址的）
+		std::vector<Track> tracks;
+		m_durations.clear();
+		bool hasClicked = false;
+		for (int i = 0;; i++)
+		{
+			const TrackItem* it = m_windowGUI->GetTrack(0, i);
+			if (!it)
+				break;
+			if (it->streamUrl.empty())
+				continue;
+			Track t;
+			t.audioPath = OnlineMusic::CachePathFor(*it);
+			t.title = it->title;
+			t.artist = it->artist;
+			t.streamUrl = it->streamUrl;
+			if (it->durationSeconds > 0)
+				m_durations[t.audioPath] = it->durationSeconds;
+			if (t.audioPath == file)
+				hasClicked = true;
+			tracks.push_back(std::move(t));
+		}
+		if (!hasClicked)   // 缓存期间乐馆列表被刷新了：把点击的这首补在末尾，保证能播
+		{
+			Track t;
+			t.audioPath = file;
+			t.title = clicked.title;
+			t.artist = clicked.artist;
+			t.streamUrl = clicked.streamUrl;
+			tracks.push_back(std::move(t));
+		}
+
+		// 列表面板展开时它的高度跟歌曲数有关，先收起来再换数据
+		if (s_playlistPanel.IsOpen())
+		{
+			s_playlistPanel.SetOpen(false);
+			ResizeWindowForPlaylist(m_hwnd, 0);
+		}
+
+		++m_onlineGen;   // 作废还在缓存的上一首
+		m_playlist.ReplaceAll(std::move(tracks), file);   // 当前指向点击的这首
+		m_onlineMode = true;
+		OutputDebugStringW((L"[Online] 播放列表已换成在线列表，共 " + std::to_wstring(m_playlist.Count()) + L" 首\n").c_str());
+
+		PlayTrack(m_playlist.CurrentIndex());
+	}
+
+	// 从在线列表换回本地列表（双击"本地/喜欢"页的歌曲时调用）。
+	void MainWindow::RestoreLocalPlaylist()
+	{
+		if (!m_onlineMode)
+			return;
+
+		if (s_playlistPanel.IsOpen())
+		{
+			s_playlistPanel.SetOpen(false);
+			ResizeWindowForPlaylist(m_hwnd, 0);
+		}
+
+		++m_onlineGen;   // 作废还在缓存的在线歌曲
+		m_playlist.ReplaceAll(std::move(m_savedLocalTracks), m_savedLocalCurrentPath);
+		m_savedLocalTracks.clear();
+		m_savedLocalCurrentPath.clear();
+		m_onlineMode = false;
+
+		m_syncPath = L"\x1";
+		m_syncCur = m_syncTotal = m_syncState = -1;
 	}
 
 	void MainWindow::PlayNextTrack()
@@ -2336,6 +2503,15 @@ namespace YuMediaPlayer
 		}
 		m_localItems = items;   // 留一份：迷你窗口收藏、喜欢页双击播放都要按路径查
 
+		// 当前播放列表是在线列表：扫描结果只更新"本地"页和备份的本地列表，不打断在线播放
+		if (m_onlineMode)
+		{
+			m_savedLocalTracks = std::move(tracks);
+			if (m_windowGUI)
+				m_windowGUI->SetLocalTracks(std::move(items));
+			return;
+		}
+
 		// 列表面板展开时它的高度跟歌曲数有关，先收起来再换数据
 		if (s_playlistPanel.IsOpen())
 		{
@@ -2415,6 +2591,8 @@ namespace YuMediaPlayer
 			{
 				if (row < 0)
 					return;
+				if (page == 1 || page == 2)
+					RestoreLocalPlaylist();   // 正在播在线列表的话，先换回本地播放列表
 				if (page == 1 && row < m_playlist.Count())
 				{
 					PlayTrack(row);
@@ -2432,6 +2610,13 @@ namespace YuMediaPlayer
 							break;
 						}
 				}
+			});
+
+		// 乐馆里双击/右键"播放 / 试听"：WindowGUI 缓存好文件后回调到这里，
+		// 把播放列表换成在线列表并播放这一首
+		m_windowGUI->SetOnlineAudioReadyCallback([this](const TrackItem& item, const std::wstring& file)
+			{
+				ApplyOnlinePlaylist(item, file);
 			});
 
 		// 主窗口列表里点爱心：WindowGUI 已经把那一行的 favorite 翻转过了，这里据此加入/移除喜欢列表

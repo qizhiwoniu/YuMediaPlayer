@@ -1,5 +1,6 @@
 #include "SettingPage.h"
 #include "OnlineMusic.h"   // 切换音乐源时通知在线歌曲模块
+#include "DesktopLyric.h"   // 桌面歌词：设置页"歌词"页直接驱动它
 #include "Theme.h"   // UITheme：设置页改主题后，主窗口/迷你窗口跟着变
 #include <shlobj.h>
 #include <math.h>
@@ -31,6 +32,9 @@ namespace YuMediaPlayer
 		fadeSeconds = clampInt(fadeSeconds, 0, 10);
 		cornerRadius = clampInt(cornerRadius, 0, 30);
 		musicSource = clampInt(musicSource, 0, 2);   // 0酷狗 1iTunes 2自建服务器
+		lyricFontSize = clampInt(lyricFontSize, 6, 72);
+		lyricColorMode = clampInt(lyricColorMode, 0, 1);
+		lyricRainbowSpeed = clampInt(lyricRainbowSpeed, 1, 10);
 	}
 
 	// ===================== 辅助代码 =====================
@@ -216,6 +220,22 @@ namespace YuMediaPlayer
 		const TrEntry kTrTable[] =
 		{
 			{ { L"设置", L"Settings", L"設定", L"설정", L"設定" } },
+			{ { L"歌词", L"Lyrics", L"歌詞", L"가사", L"歌詞" } },
+			{ { L"显示桌面歌词", L"Show desktop lyrics", L"デスクトップ歌詞を表示", L"데스크톱 가사 표시", L"顯示桌面歌詞" } },
+			{ { L"在桌面上显示悬浮的歌词，可拖动", L"Floating lyrics on the desktop; drag to move", L"デスクトップに歌詞を浮かせて表示（ドラッグで移動）", L"데스크톱에 가사를 띄워 표시 (드래그로 이동)", L"在桌面上顯示懸浮歌詞，可拖曳" } },
+			{ { L"锁定歌词", L"Lock lyrics", L"歌詞をロック", L"가사 잠금", L"鎖定歌詞" } },
+			{ { L"锁定后鼠标可穿透歌词，不能拖动", L"Mouse clicks pass through; lyrics cannot be dragged", L"クリックが歌詞を通過し、ドラッグできません", L"클릭이 가사를 통과하며 드래그할 수 없습니다", L"鎖定後滑鼠可穿透歌詞，不能拖曳" } },
+			{ { L"歌词字体", L"Lyric font", L"歌詞フォント", L"가사 글꼴", L"歌詞字型" } },
+			{ { L"默认使用胡敬礼字体（放入 fonts 文件夹或安装到系统）", L"Default is the Hu Jingli font (put it in the fonts folder or install it)", L"既定は胡敬礼フォント（fonts フォルダーに入れるかインストール）", L"기본값은 후징리 글꼴 (fonts 폴더에 넣거나 설치)", L"預設使用胡敬禮字型（放入 fonts 資料夾或安裝到系統）" } },
+			{ { L"胡敬礼字体（默认）", L"Hu Jingli (default)", L"胡敬礼（既定）", L"후징리 (기본값)", L"胡敬禮字型（預設）" } },
+			{ { L"歌词字号", L"Lyric size", L"歌詞サイズ", L"가사 크기", L"歌詞字級" } },
+			{ { L"桌面歌词的文字大小", L"Text size of the desktop lyrics", L"デスクトップ歌詞の文字サイズ", L"데스크톱 가사의 글자 크기", L"桌面歌詞的文字大小" } },
+			{ { L"歌词颜色", L"Lyric color", L"歌詞の色", L"가사 색상", L"歌詞顏色" } },
+			{ { L"固定黄色，或随时间流动变化的七彩色", L"Solid yellow, or rainbow colors that flow over time", L"固定のイエロー、または流れるレインボー", L"고정 노란색 또는 흐르는 무지개색", L"固定黃色，或隨時間流動變化的七彩色" } },
+			{ { L"黄色", L"Yellow", L"イエロー", L"노란색", L"黃色" } },
+			{ { L"七彩", L"Rainbow", L"レインボー", L"무지개", L"七彩" } },
+			{ { L"七彩变化速度", L"Rainbow speed", L"レインボー速度", L"무지개 속도", L"七彩變化速度" } },
+			{ { L"七彩颜色流动的快慢（仅七彩模式有效）", L"How fast the colors flow (rainbow mode only)", L"色が流れる速さ（レインボーのみ）", L"색이 흐르는 속도 (무지개 모드 전용)", L"七彩顏色流動的快慢（僅七彩模式有效）" } },
 			{ { L"通用", L"General", L"一般", L"일반", L"一般" } },
 			{ { L"界面", L"Interface", L"インターフェース", L"인터페이스", L"介面" } },
 			{ { L"系统", L"System", L"システム", L"시스템", L"系統" } },
@@ -312,10 +332,29 @@ namespace YuMediaPlayer
 		BuildItems();
 		LayoutItems();
 		Load();
+
+		// 用户拖动桌面歌词后记住位置；在歌词右键菜单里关闭/锁定后同步设置页的开关
+		DesktopLyric::Instance().SetMovedCallback([this](int x, int y)
+			{
+				m_settings.lyricHasPos = true;
+				m_settings.lyricX = x;
+				m_settings.lyricY = y;
+				Save();
+			});
+		DesktopLyric::Instance().SetUserChangedCallback([this](bool visible, bool locked)
+			{
+				m_settings.lyricEnabled = visible;
+				m_settings.lyricLocked = locked;
+				Save();
+				if (m_hwnd)
+					InvalidateRect(m_hwnd, nullptr, FALSE);
+			});
 	}
 
 	SettingPage::~SettingPage()
 	{
+		DesktopLyric::Instance().SetMovedCallback(nullptr);          // 回调里捕获了 this，先清掉
+		DesktopLyric::Instance().SetUserChangedCallback(nullptr);
 		if (m_hwnd)
 		{
 			DestroyWindow(m_hwnd);
@@ -517,32 +556,51 @@ namespace YuMediaPlayer
 			m_pages[2].push_back(it);
 		}
 
-		// ---- 页 3：音乐源 ----（下标要和 OnlineMusic::Source 一致：0酷狗 1iTunes 2自建服务器）
-		m_pages[3].push_back(combo(Tr(L"音乐源"), Tr(L"在线歌曲的来源接口"), &m_settings.musicSource,
+		// ---- 页 3：歌词（桌面歌词）----
+		m_pages[3].push_back(toggle(Tr(L"显示桌面歌词"), Tr(L"在桌面上显示悬浮的歌词，可拖动"), &m_settings.lyricEnabled));
+		m_pages[3].push_back(toggle(Tr(L"锁定歌词"), Tr(L"锁定后鼠标可穿透歌词，不能拖动"), &m_settings.lyricLocked));
+		{
+			std::vector<std::wstring> fonts;
+			fonts.push_back(Tr(L"胡敬礼字体（默认）"));       // 第 0 项 = 默认（空字符串 -> 胡敬礼字体）
+			for (const std::wstring& f : InstalledFonts())
+				fonts.push_back(f);
+			Item it = combo(Tr(L"歌词字体"), Tr(L"默认使用胡敬礼字体（放入 fonts 文件夹或安装到系统）"), nullptr, fonts, 240);
+			it.comboStr = &m_settings.lyricFontName;
+			it.fontList = true;
+			m_pages[3].push_back(it);
+		}
+		m_pages[3].push_back(slider(Tr(L"歌词字号"), Tr(L"桌面歌词的文字大小"), &m_settings.lyricFontSize, 6, 72, L" pt"));
+		{
+			Item it = choice(Tr(L"歌词颜色"), Tr(L"固定黄色，或随时间流动变化的七彩色"), &m_settings.lyricColorMode, { Tr(L"黄色"), Tr(L"七彩") });
+			it.compact = true;
+			m_pages[3].push_back(it);
+		}
+		m_pages[3].push_back(slider(Tr(L"七彩变化速度"), Tr(L"七彩颜色流动的快慢（仅七彩模式有效）"), &m_settings.lyricRainbowSpeed, 1, 10, L""));
+
+		// ---- 页 4：音乐源 ----（下标要和 OnlineMusic::Source 一致：0酷狗 1iTunes 2自建服务器）
+		m_pages[4].push_back(combo(Tr(L"音乐源"), Tr(L"在线歌曲的来源接口"), &m_settings.musicSource,
 			{ Tr(L"酷狗音乐（仅歌曲列表）"),
 			  Tr(L"iTunes 试听（国内可用）"), Tr(L"自建服务器（Navidrome/Subsonic）") }, 320));
 		{
-			static const wchar_t* kCaps[7] = { L"仅列表，不可试听", L"可试听/下载 · 需 client_id", L"可试听/下载 · CC · 免 Key",
-				L"可试听/下载 · CC · 免 Key", L"可试听/下载 · CC · 免 Key · 有限速",
+			static const wchar_t* kCaps[OnlineMusic::SourceCount] = { L"仅列表，不可试听",
 				L"仅 30 秒试听 · 国内可用 · 免 Key", L"完整试听/下载 · 你自己的音乐库" };
-			const int src = m_settings.musicSource < 0 ? 0 : (m_settings.musicSource > 6 ? 6 : m_settings.musicSource);
-			m_pages[3].push_back(info(Tr(L"当前来源"), Tr(kCaps[src])));
-			if (src == 1)   //
+			int src = m_settings.musicSource;
+			if (src < 0) src = 0;
+			if (src >= OnlineMusic::SourceCount) src = OnlineMusic::SourceCount - 1;
+			m_pages[4].push_back(info(Tr(L"当前来源"), Tr(kCaps[src])));
+			if (src == OnlineMusic::SourceSubsonic)   // 自建服务器需要地址/账号
 			{
-			}
-			else if (src == 6)   // 自建服务器需要地址/账号
-			{
-				m_pages[3].push_back(info(Tr(L"服务器"), OnlineMusic::SourceCanPlay(6) ? Tr(L"已配置") : Tr(L"未配置")));
-				m_pages[3].push_back(button(Tr(L"打开配置文件"), Tr(L"在 [Music] 里填写 SubsonicUrl / SubsonicUser / SubsonicPassword 并保存"), Tr(L"打开"), ActOpenIni));
+				m_pages[4].push_back(info(Tr(L"服务器"), OnlineMusic::SourceCanPlay(OnlineMusic::SourceSubsonic) ? Tr(L"已配置") : Tr(L"未配置")));
+				m_pages[4].push_back(button(Tr(L"打开配置文件"), Tr(L"在 [Music] 里填写 SubsonicUrl / SubsonicUser / SubsonicPassword 并保存"), Tr(L"打开"), ActOpenIni));
 			}
 		}
-		m_pages[3].push_back(button(Tr(L"刷新列表"), Tr(L"重新读取配置并重新加载当前音乐源的歌曲"), Tr(L"刷新列表"), ActReloadMusicSource));
+		m_pages[4].push_back(button(Tr(L"刷新列表"), Tr(L"重新读取配置并重新加载当前音乐源的歌曲"), Tr(L"刷新列表"), ActReloadMusicSource));
 
-		// ---- 页 4：关于 ----
-		m_pages[4].push_back(info(Tr(L"YuMediaPlayer 版本"), m_version));
-		m_pages[4].push_back(info(Tr(L"配置文件"), IniPath()));
-		m_pages[4].push_back(button(Tr(L"检查更新"), Tr(L"查看是否有新版本"), Tr(L"立即检查"), ActCheckUpdate));
-		m_pages[4].push_back(button(Tr(L"恢复默认设置"), Tr(L"将所有设置恢复为初始值"), Tr(L"恢复默认"), ActReset));
+		// ---- 页 5：关于 ----
+		m_pages[5].push_back(info(Tr(L"YuMediaPlayer 版本"), m_version));
+		m_pages[5].push_back(info(Tr(L"配置文件"), IniPath()));
+		m_pages[5].push_back(button(Tr(L"检查更新"), Tr(L"查看是否有新版本"), Tr(L"立即检查"), ActCheckUpdate));
+		m_pages[5].push_back(button(Tr(L"恢复默认设置"), Tr(L"将所有设置恢复为初始值"), Tr(L"恢复默认"), ActReset));
 	}
 
 	// 计算每个设置项的行区域和控件区域（窗口大小固定，所以只需算一次）
@@ -593,6 +651,36 @@ namespace YuMediaPlayer
 		}
 	}
 
+	// 把歌词设置同步给桌面歌词窗口（DesktopLyric 是全局单例，所以不依赖外部回调也能生效）
+	static void ApplyLyricSettings(const PlayerSettings& s)
+	{
+		DesktopLyric& d = DesktopLyric::Instance();
+		LyricStyle st;
+		st.fontName = s.lyricFontName;
+		st.fontSize = s.lyricFontSize;
+		st.colorMode = s.lyricColorMode;
+		st.rainbowSpeed = s.lyricRainbowSpeed;
+		st.locked = s.lyricLocked;
+		d.SetStyle(st);
+
+		if (s.lyricEnabled)
+		{
+			if (!d.IsVisible())
+			{
+				if (s.lyricHasPos)   // 记住的位置还在某块屏幕里才恢复（拔掉副屏后不会跑到屏幕外）
+				{
+					const int vx = GetSystemMetrics(SM_XVIRTUALSCREEN), vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+					const int vw = GetSystemMetrics(SM_CXVIRTUALSCREEN), vh = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+					if (s.lyricX > vx - 200 && s.lyricX < vx + vw - 100 && s.lyricY > vy - 20 && s.lyricY < vy + vh - 20)
+						d.SetPlacement(s.lyricX, s.lyricY);
+				}
+				d.Show();
+			}
+		}
+		else if (d.IsVisible())
+			d.Hide();
+	}
+
 	// 把当前音乐源 / client_id 同步给在线歌曲模块（OnlineMusic），这样不依赖外部回调也能生效
 	static void ApplyMusicBackend(const PlayerSettings& s)
 	{
@@ -636,6 +724,18 @@ namespace YuMediaPlayer
 
 		m_settings.musicSource = GetPrivateProfileIntW(L"Music", L"Source", d.musicSource, ini.c_str());
 
+		m_settings.lyricEnabled = GetPrivateProfileIntW(L"Lyric", L"Enabled", d.lyricEnabled, ini.c_str()) != 0;
+		m_settings.lyricLocked = GetPrivateProfileIntW(L"Lyric", L"Locked", d.lyricLocked, ini.c_str()) != 0;
+		wchar_t lyricFont[128] = { 0 };
+		GetPrivateProfileStringW(L"Lyric", L"FontName", L"", lyricFont, 128, ini.c_str());
+		m_settings.lyricFontName = lyricFont;
+		m_settings.lyricFontSize = GetPrivateProfileIntW(L"Lyric", L"FontSize", d.lyricFontSize, ini.c_str());
+		m_settings.lyricColorMode = GetPrivateProfileIntW(L"Lyric", L"ColorMode", d.lyricColorMode, ini.c_str());
+		m_settings.lyricRainbowSpeed = GetPrivateProfileIntW(L"Lyric", L"RainbowSpeed", d.lyricRainbowSpeed, ini.c_str());
+		m_settings.lyricHasPos = GetPrivateProfileIntW(L"Lyric", L"HasPos", 0, ini.c_str()) != 0;
+		m_settings.lyricX = (int)GetPrivateProfileIntW(L"Lyric", L"X", 0, ini.c_str());
+		m_settings.lyricY = (int)GetPrivateProfileIntW(L"Lyric", L"Y", 0, ini.c_str());
+
 		// 开机自启以注册表里的实际状态为准
 		m_settings.startWithWindows = IsAutoStartEnabled();
 		m_lastAutoStart = m_settings.startWithWindows;
@@ -643,6 +743,7 @@ namespace YuMediaPlayer
 		m_settings.Clamp();
 		m_lastMusicSource = m_settings.musicSource;
 		ApplyMusicBackend(m_settings);
+		ApplyLyricSettings(m_settings);
 		UITheme::SetMode(m_settings.theme);
 		BuildItems();      // "音乐源"页的 client_id 状态要跟着刷新
 		LayoutItems();
@@ -674,6 +775,16 @@ namespace YuMediaPlayer
 		WritePrivateProfileStringW(L"System", L"MusicFolder", m_settings.musicFolder.c_str(), ini.c_str());
 
 		WriteInt(L"Music", L"Source", m_settings.musicSource, ini);
+
+		WriteInt(L"Lyric", L"Enabled", m_settings.lyricEnabled ? 1 : 0, ini);
+		WriteInt(L"Lyric", L"Locked", m_settings.lyricLocked ? 1 : 0, ini);
+		WritePrivateProfileStringW(L"Lyric", L"FontName", m_settings.lyricFontName.c_str(), ini.c_str());
+		WriteInt(L"Lyric", L"FontSize", m_settings.lyricFontSize, ini);
+		WriteInt(L"Lyric", L"ColorMode", m_settings.lyricColorMode, ini);
+		WriteInt(L"Lyric", L"RainbowSpeed", m_settings.lyricRainbowSpeed, ini);
+		WriteInt(L"Lyric", L"HasPos", m_settings.lyricHasPos ? 1 : 0, ini);
+		WriteInt(L"Lyric", L"X", m_settings.lyricX, ini);
+		WriteInt(L"Lyric", L"Y", m_settings.lyricY, ini);
 		
 	}
 
@@ -690,6 +801,7 @@ namespace YuMediaPlayer
 		m_lastMusicFolder = m_settings.musicFolder;   // 代码里设置的不触发回调
 		m_lastMusicSource = m_settings.musicSource;
 		ApplyMusicBackend(m_settings);
+		ApplyLyricSettings(m_settings);
 		RebuildIfLanguageChanged();
 		if (m_settings.startWithWindows != m_lastAutoStart)
 		{
@@ -1255,6 +1367,7 @@ namespace YuMediaPlayer
 			if (m_onMusicSource)
 				m_onMusicSource();
 		}
+		ApplyLyricSettings(m_settings);       // 歌词设置变了：桌面歌词立即刷新（拖动字号滑块时实时预览）
 		UITheme::SetMode(m_settings.theme);   // 主题变了：主窗口、迷你窗口、设置页一起重绘
 		if (m_onChanged)
 			m_onChanged(m_settings);
@@ -1433,7 +1546,7 @@ namespace YuMediaPlayer
 		}
 
 		// ---- 左侧分类 ----
-		const wchar_t* kTabNames[kTabCount] = { Tr(L"通用"), Tr(L"界面"), Tr(L"系统"), Tr(L"音乐源"), Tr(L"关于") };
+		const wchar_t* kTabNames[kTabCount] = { Tr(L"通用"), Tr(L"界面"), Tr(L"系统"), Tr(L"歌词"), Tr(L"音乐源"), Tr(L"关于") };
 		for (int i = 0; i < kTabCount; i++)
 		{
 			RECT r = NavItemRect(i);

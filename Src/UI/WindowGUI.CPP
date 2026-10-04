@@ -8,6 +8,7 @@
 #include "Core/Theme.h"
 #include "WindowGUI.h"
 #include "Core/SettingPage.h"
+#include "DesktopLyric.h"   // 歌词下载目录 Assets-lrc
 #include <thread>
 #include <shlobj.h>
 #include <knownfolders.h>
@@ -276,6 +277,11 @@ namespace YuMediaPlayer
 			std::wstring error;            // failure reason
 			std::vector<TrackItem> tracks;
 		};
+		// 在线试听/下载的调试输出：VS 的"输出"窗口里搜 [Online] 就能看到每一步走到哪了
+		void OnlineLog(const std::wstring& s)
+		{
+			OutputDebugStringW((L"[Online] " + s + L"\n").c_str());
+		}
 		const UINT kMsgTaskDone = WM_APP + 3;   // 试听缓存 / 下载歌曲 / 下载歌词 完成
 		struct TaskResult
 		{
@@ -1671,6 +1677,8 @@ namespace YuMediaPlayer
 
 	void WindowGUI::PlayTrackItem(int page, int row, const TrackItem& track)
 	{
+		OnlineLog(L"PlayTrackItem page=" + std::to_wstring(page) + L" row=" + std::to_wstring(row)
+			+ L" title=" + track.title + L" stream=" + (track.streamUrl.empty() ? L"(empty)" : track.streamUrl));
 		if (!track.streamUrl.empty())
 		{
 			RunTrackTask(0, page, track);   // 在线歌曲：缓存整首 -> 回调给外部播放
@@ -1679,7 +1687,7 @@ namespace YuMediaPlayer
 		if (page == 0)
 		{
 			Notify(OnlineMusic::GetSource() == OnlineMusic::SourceKugou
-				? L"\u5F53\u524D\u6570\u636E\u6E90\uFF08\u9177\u72D7\uFF09\u53EA\u63D0\u4F9B\u6B4C\u66F2\u5217\u8868\uFF0C\u4E0D\u63D0\u4F9B\u64AD\u653E/\u4E0B\u8F7D\u5730\u5740\u3002\n\u8BF7\u5230 \u8BBE\u7F6E \u2192 \u97F3\u4E50\u6E90\uFF0C\u5207\u6362\u5230 Internet Archive / ccMixter / Openverse / Jamendo\uFF0C\u518D\u70B9\u201C\u5237\u65B0\u5217\u8868\u201D\u3002"
+				? L"\u5F53\u524D\u6570\u636E\u6E90\uFF08\u9177\u72D7\uFF09\u53EA\u63D0\u4F9B\u6B4C\u66F2\u5217\u8868\uFF0C\u4E0D\u63D0\u4F9B\u64AD\u653E/\u4E0B\u8F7D\u5730\u5740\u3002\n\u8BF7\u5230 \u8BBE\u7F6E \u2192 \u97F3\u4E50\u6E90\uFF0C\u5207\u6362\u5230 iTunes \u6216\u81EA\u5EFA\u670D\u52A1\u5668\uFF0C\u518D\u70B9\u201C\u5237\u65B0\u5217\u8868\u201D\u3002"
 				: L"\u8FD9\u9996\u6B4C\u6CA1\u6709\u53EF\u7528\u7684\u64AD\u653E\u5730\u5740\uFF0C\u6362\u4E00\u9996\u8BD5\u8BD5\uFF0C\u6216\u70B9\u8BBE\u7F6E\u91CC\u7684\u201C\u5237\u65B0\u5217\u8868\u201D\u91CD\u65B0\u52A0\u8F7D\u3002", true);
 			return;
 		}
@@ -1697,15 +1705,15 @@ namespace YuMediaPlayer
 
 		std::wstring dir = GetDownloadDir(m_downloadDir);
 		std::wstring base;   // 歌词文件名（空 = "歌手 - 歌名"）
-		if (kind == 2 && track.streamUrl.empty() && !track.path.empty()
-			&& GetFileAttributesW(track.path.c_str()) != INVALID_FILE_ATTRIBUTES)
+		if (kind == 2)
 		{
-			// 本地歌曲：歌词存到歌曲所在目录，和歌曲同名
-			size_t sep = track.path.find_last_of(L"\\/");
-			if (sep != std::wstring::npos)
+			// 歌词统一保存到 YuMediaPlayer 的 Assets\lrc 目录（exe 目录下的 Assets\lrc，不存在会自动创建）
+			dir = DesktopLyric::GetLyricDir();
+			if (track.streamUrl.empty() && !track.path.empty())
 			{
-				dir = track.path.substr(0, sep);
-				std::wstring name = track.path.substr(sep + 1);
+				// 本地歌曲：文件名和歌曲同名，桌面歌词按歌曲文件名就能找到
+				size_t sep = track.path.find_last_of(L"\\/");
+				std::wstring name = (sep == std::wstring::npos) ? track.path : track.path.substr(sep + 1);
 				size_t dot = name.find_last_of(L'.');
 				base = (dot == std::wstring::npos) ? name : name.substr(0, dot);
 			}
@@ -1726,6 +1734,8 @@ namespace YuMediaPlayer
 			else if (kind == 1) r->ok = OnlineMusic::DownloadSong(track, dir, r->file, &err);
 			else                r->ok = OnlineMusic::DownloadLyrics(track, dir, base, r->file, &err);
 			r->message = err;
+			OnlineLog(std::wstring(L"task kind=") + std::to_wstring(kind) + L" ok=" + (r->ok ? L"1" : L"0")
+				+ L" file=" + r->file + L" err=" + err);
 			if (!IsWindow(hwnd) || !PostMessageW(hwnd, kMsgTaskDone, 0, (LPARAM)r))
 				delete r;
 		}).detach();
@@ -2101,9 +2111,17 @@ namespace YuMediaPlayer
 				if (r->gen != m_audioGen)
 					return 0;   // 中途又点了别的歌，这首丢掉
 				if (!r->ok)
-					Notify(L"\u8BD5\u542C\u5931\u8D25\uFF1A" + r->message, true);
+				{
+					const std::wstring failMsg = L"\u8BD5\u542C\u5931\u8D25\uFF1A" + r->message;
+					OnlineLog(failMsg);
+					if (m_onOnlineMessage) m_onOnlineMessage(failMsg);
+					MessageBoxW(m_hwnd, failMsg.c_str(), L"YuMediaPlayer", MB_OK | MB_ICONWARNING);   // 失败必须让人看见
+				}
 				else if (m_onOnlineAudioReady)
+				{
+					OnlineLog(L"-> m_onOnlineAudioReady: " + r->file);
 					m_onOnlineAudioReady(r->track, r->file);
+				}
 				else
 				{
 					// 外部没有接 SetOnlineAudioReadyCallback：把缓存好的文件当成"本地歌曲"加到本地列表末尾，
@@ -2123,10 +2141,16 @@ namespace YuMediaPlayer
 							row = (int)m_tracks[1].size() - 1;
 							InvalidateRect(m_hwnd, &m_listRect, FALSE);
 						}
+						OnlineLog(L"-> fallback m_onTrackActivate(1, " + std::to_wstring(row) + L") local list size="
+							+ std::to_wstring(m_tracks[1].size()) + L" file=" + t.path
+							+ L"  (\u5BBF\u4E3B\u5982\u679C\u6309\u81EA\u5DF1\u7684\u672C\u5730\u5217\u8868\u53D6\u6B4C\uFF0C\u8FD9\u91CC\u4F1A\u5BF9\u4E0D\u4E0A)");
 						m_onTrackActivate(1, row);
 					}
 					else
+					{
+						OnlineLog(L"-> ShellExecute: " + r->file);
 						ShellExecuteW(m_hwnd, L"open", r->file.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+					}
 				}
 			}
 			else if (r->ok)
