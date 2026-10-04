@@ -111,6 +111,10 @@ namespace YuMediaPlayer
 		void SetOnlineAudioReadyCallback(std::function<void(const TrackItem&, const std::wstring&)> callback);
 		// 接收进度/结果提示（比如显示成 toast）。不设置的话，成功/失败结果会用消息框提示
 		void SetOnlineMessageCallback(std::function<void(const std::wstring&)> callback);
+		// 自动下载歌词（后台、不弹提示）：播放器换歌后找不到 .lrc 时调用。
+		// 同一首歌（歌名+歌手）本次运行只会尝试一次；返回 true = 已经开始下载。
+		// 下载成功后如果还是当前这首，会直接读进桌面歌词。
+		bool AutoDownloadLyrics(const TrackItem& track);
 		// 下载目录，默认 "音乐\YuMediaPlayer"
 		void SetDownloadDir(const std::wstring& dir);
 		// 设置页：由 WindowGUI 持有（第一次调用时创建，构造时会自己读 settings.ini）

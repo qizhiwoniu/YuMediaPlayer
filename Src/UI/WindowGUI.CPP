@@ -8,7 +8,8 @@
 #include "Core/Theme.h"
 #include "WindowGUI.h"
 #include "Core/SettingPage.h"
-#include "DesktopLyric.h"   // 歌词下载目录 Assets-lrc
+#include <set>
+#include "DesktopLyric.h"   // 桌面歌词 + 歌词下载目录 Assets\lrc
 #include <thread>
 #include <shlobj.h>
 #include <knownfolders.h>
@@ -292,6 +293,10 @@ namespace YuMediaPlayer
 			std::wstring file;      // 成功后的本地文件
 			TrackItem track;
 		};
+		// 自动下载歌词：最近一次请求的歌（回来时对得上才读进桌面歌词），以及已经试过的歌（只试一次）
+		std::wstring s_autoLyricKey;
+		std::set<std::wstring> s_autoLyricTried;
+		std::wstring LyricKey(const TrackItem& t) { return t.title + L"\x1" + t.artist; }
 		// 默认下载目录：音乐\YuMediaPlayer
 		std::wstring GetDownloadDir(const std::wstring& custom)
 		{
@@ -1705,7 +1710,7 @@ namespace YuMediaPlayer
 
 		std::wstring dir = GetDownloadDir(m_downloadDir);
 		std::wstring base;   // 歌词文件名（空 = "歌手 - 歌名"）
-		if (kind == 2)
+		if (kind == 2 || kind == 3)   // 3 = 自动下载歌词（静默）
 		{
 			// 歌词统一保存到 YuMediaPlayer 的 Assets\lrc 目录（exe 目录下的 Assets\lrc，不存在会自动创建）
 			dir = DesktopLyric::GetLyricDir();
@@ -1721,7 +1726,7 @@ namespace YuMediaPlayer
 
 		if (kind == 0)      Notify(L"\u6B63\u5728\u7F13\u51B2\uFF1A" + track.title + L" ...", false);
 		else if (kind == 1) Notify(L"\u5F00\u59CB\u4E0B\u8F7D\uFF1A" + track.title + L" ...", false);
-		else                Notify(L"\u6B63\u5728\u83B7\u53D6\u6B4C\u8BCD\uFF1A" + track.title + L" ...", false);
+		else if (kind == 2) Notify(L"\u6B63\u5728\u83B7\u53D6\u6B4C\u8BCD\uFF1A" + track.title + L" ...", false);
 
 		std::thread([hwnd, kind, gen, track, dir, base]()
 		{
@@ -1739,6 +1744,18 @@ namespace YuMediaPlayer
 			if (!IsWindow(hwnd) || !PostMessageW(hwnd, kMsgTaskDone, 0, (LPARAM)r))
 				delete r;
 		}).detach();
+	}
+
+	bool WindowGUI::AutoDownloadLyrics(const TrackItem& track)
+	{
+		if (!m_hwnd || track.title.empty())
+			return false;
+		const std::wstring key = LyricKey(track);
+		if (!s_autoLyricTried.insert(key).second)
+			return false;          // 这首歌已经自动试过了，别反复请求
+		s_autoLyricKey = key;
+		RunTrackTask(3, 1, track);
+		return true;
 	}
 
 	void WindowGUI::ShowTrackMenu(POINT clientPt, int page, int row)
@@ -2152,6 +2169,24 @@ namespace YuMediaPlayer
 						ShellExecuteW(m_hwnd, L"open", r->file.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
 					}
 				}
+			}
+			else if (r->kind == 3)
+			{
+				// 自动下载歌词：不弹提示。成功且还是当前这首 -> 读进桌面歌词；失败就保持"暂无歌词"
+				if (LyricKey(r->track) == s_autoLyricKey)
+				{
+					if (!(r->ok && DesktopLyric::Instance().LoadLrcFile(r->file)))
+						DesktopLyric::Instance().ClearLyrics(L"\u6682\u65E0\u6B4C\u8BCD");
+				}
+				if (!r->ok)
+					OnlineLog(L"auto lyric failed: " + r->message);
+			}
+			else if (r->ok && r->kind == 2)
+			{
+				// 歌词下载好了：如果就是正在播放的这首，马上读进桌面歌词
+				if (r->track.title == m_nowPlayingTitle)
+					DesktopLyric::Instance().LoadLrcFile(r->file);
+				Notify(L"\u6B4C\u8BCD\u5DF2\u4FDD\u5B58\uFF1A" + r->file, true);
 			}
 			else if (r->ok)
 				Notify((r->kind == 1 ? L"\u6B4C\u66F2\u5DF2\u4FDD\u5B58\uFF1A" : L"\u6B4C\u8BCD\u5DF2\u4FDD\u5B58\uFF1A") + r->file, true);

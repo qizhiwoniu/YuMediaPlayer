@@ -21,6 +21,7 @@
 #include "Core/Playlist.h"
 #include "Core/PlaylistPanel.h"
 #include "Core/SettingPage.h"
+#include "DesktopLyric.h"      // 桌面歌词（如果它不在默认包含路径里，按实际位置加目录前缀）
 #include "Core/LocalMusicScanner.h"   
 
 #pragma comment(lib, "dwmapi.lib")
@@ -2919,6 +2920,66 @@ namespace YuMediaPlayer
 
 	void MainWindow::SyncMainWindowPlayer()
 	{
+		// ---- 桌面歌词同步 ----
+		// 放在"主窗口是否可见"的判断之前：桌面歌词是独立窗口，主窗口隐藏（只剩迷你窗口）时也要跟着走。
+		{
+			static std::wstring s_lyricPath = L"\x1";   // 上次给歌词加载过的歌（\x1 = 还没加载过）
+			static int s_lyricState = -1;
+
+			AudioPlayer* lp = GetAudioPlayer();
+			const PlaybackState lst = lp ? lp->GetPlaybackState() : PlaybackState::Stopped;
+			const Track* lt = m_playlist.Current();
+			DesktopLyric& lyric = DesktopLyric::Instance();
+
+			// 换歌（或第一次）：读对应的 .lrc。同名 .lrc / Assets\lrc 里的 "歌手 - 歌名.lrc" 都会找
+			const std::wstring lpath = lt ? lt->audioPath : std::wstring();
+			if (lpath != s_lyricPath)
+			{
+				s_lyricPath = lpath;
+				if (lt)
+				{
+					const bool found = lyric.LoadForTrack(lt->audioPath, lt->title, lt->artist);
+					if (!found && m_windowGUI)
+					{
+						// 本地和 Assets\lrc 里都没有 -> 自动去网上下载（后台进行，下载好会自动显示）
+						TrackItem ti;
+						if (m_onlineMode)
+							for (int i = 0; i < 500 && !ti.streamUrl.size(); i++)   // 乐馆列表里有完整信息（含歌曲 id）
+							{
+								const TrackItem* it = m_windowGUI->GetTrack(0, i);
+								if (!it) break;
+								if (it->title == lt->title && it->artist == lt->artist) ti = *it;
+							}
+						if (ti.title.empty())
+						{
+							ti.title = lt->title;
+							ti.artist = lt->artist;
+							ti.path = lt->audioPath;
+							ti.streamUrl = lt->streamUrl;
+						}
+						if (m_windowGUI->AutoDownloadLyrics(ti))
+							lyric.ClearLyrics(L"\u6B63\u5728\u641C\u7D22\u6B4C\u8BCD...");
+					}
+				}
+				else
+					lyric.ClearLyrics();
+				lyric.SetPosition(0);
+			}
+
+			// 播放进度：毫秒精度，拖动进度条/切歌后会自动对齐
+			if (lp && lst != PlaybackState::Stopped)
+				lyric.SetPosition(static_cast<int>(lp->GetCurrentPosition()));
+			else if (lst == PlaybackState::Stopped)
+				lyric.SetPosition(0);
+
+			const int lstInt = static_cast<int>(lst);
+			if (lstInt != s_lyricState)
+			{
+				s_lyricState = lstInt;
+				lyric.SetPlaying(lst == PlaybackState::Playing);
+			}
+		}
+
 		if (!m_windowGUI)
 			return;
 		const HWND gw = m_windowGUI->GetHWND();

@@ -2,8 +2,8 @@
 ; SEE THE DOCUMENTATION FOR DETAILS ON CREATING INNO SETUP SCRIPT FILES!
 ; Non-commercial use only
 
-#define MyAppName "Yu音乐"
-#define MyAppVersion "1.2.0.0"
+#define MyAppName "余余音乐"
+#define MyAppVersion "1.2.0.1"
 #define MyAppPublisher "余鹏"
 #define MyAppURL "https://github.com/qizhiwoniu"
 #define MyAppExeName "YuMediaPlayer.exe"
@@ -68,6 +68,8 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 Name: "quicklaunchicon"; Description: "{cm:CreateQuickLaunchIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Components: "main"; Flags: unchecked
 [Files]
 //Source: "C:\Users\Administrator\Desktop\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "font\*.ttf"; DestDir: "{autofonts}"; FontInstall: "胡敬礼毛笔行书简"; Flags: onlyifdoesntexist uninsneveruninstall
+Source: "D:\visualstudio\YuMediaPlayer\fengbao\lrc\*"; DestDir: "{app}\lrc"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "D:\visualstudio\YuMediaPlayer\fengbao\disk\*"; DestDir: "{app}\disk"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "D:\visualstudio\YuMediaPlayer\fengbao\song\*"; DestDir: "{app}\song"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "D:\visualstudio\YuMediaPlayer\fengbao\ui\*"; DestDir: "{app}\ui"; Flags: ignoreversion recursesubdirs createallsubdirs

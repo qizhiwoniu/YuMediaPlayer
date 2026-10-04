@@ -35,12 +35,12 @@ namespace YuMediaPlayer
 		std::wstring musicFolder;       // 本地音乐目录，空=未设置
 
 		// ---- 桌面歌词（设置页"歌词"）----
-		bool lyricEnabled = false;      // 是否显示桌面歌词
+		bool lyricEnabled = true;       // 是否显示桌面歌词（默认显示）
 		bool lyricLocked = false;       // 锁定歌词（鼠标穿透，不能拖动）
-		std::wstring lyricFontName;     // 歌词字体名，空=默认的"胡敬礼"字体
+		std::wstring lyricFontName;     // 歌词字体名，空=默认的"胡敬礼毛笔行书简"
 		int  lyricFontSize = 30;        // 歌词字号（pt）6~72
-		int  lyricColorMode = 0;        // 0=黄色 1=七彩（颜色流动变化）
-		int  lyricRainbowSpeed = 5;     // 七彩变化速度 1~10
+		int  lyricColorMode = 1;        // 0=黄色 1=七彩（颜色流动变化），默认七彩
+		int  lyricRainbowSpeed = 10;    // 七彩变化速度 1~10，默认最快
 		bool lyricHasPos = false;       // 是否记住了窗口位置
 		int  lyricX = 0;                // 歌词窗口左上角（屏幕坐标）
 		int  lyricY = 0;
