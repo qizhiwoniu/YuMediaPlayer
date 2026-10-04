@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cwchar>
+#include <cwctype>
 #include <memory>
 #include <windowsx.h>
 #include <algorithm>
@@ -12,6 +13,8 @@
 #include <string>
 #include <shobjidl.h>   // IShellItemImageFactory：读取音频内嵌封面
 #include <thread>
+#include <atomic>
+#include <winhttp.h>   // 自动下载封面
 #include "Core/Theme.h"
 #include "UI/WindowGUI.h"
 #include "UI/miniWindowGUI.h"
@@ -25,6 +28,7 @@
 #include "Core/LocalMusicScanner.h"   
 
 #pragma comment(lib, "dwmapi.lib")
+#pragma comment(lib, "winhttp.lib")
 
 namespace YuMediaPlayer
 {
@@ -71,6 +75,16 @@ namespace YuMediaPlayer
 		std::wstring error;
 		std::wstring file;
 	};
+	// 封面下载完成（后台线程 -> 主窗口，lParam = new 出来的 CoverResult，主窗口收到后 delete）
+	static constexpr UINT WM_YU_COVER_READY = WM_APP + 78;
+	struct CoverResult
+	{
+		bool ok = false;
+		std::wstring audioPath;   // 这张封面是给哪首歌下载的（回来时对不上当前歌就丢弃）
+		std::wstring file;        // 保存在 exe目录\\disk 里的图片
+	};
+	static void BeginCoverDownload(HWND hwnd, const std::wstring& audioPath, const std::wstring& title, const std::wstring& artist);
+
 	static bool IsCachedFileReady(const std::wstring& path)
 	{
 		WIN32_FILE_ATTRIBUTE_DATA d = {};
@@ -1044,6 +1058,24 @@ namespace YuMediaPlayer
 				return 0;
 			}
 			PlayTrack(r->index);   // 这次文件已经在本地了，走正常切歌流程（淡入淡出、封面、同步都照常）
+			return 0;
+		}
+		case WM_YU_COVER_READY:
+		{
+			// 封面下载好了：还是当前这首 -> 同时换到圆形封面和主窗口底部播放栏
+			std::unique_ptr<CoverResult> r(reinterpret_cast<CoverResult*>(lParam));
+			if (!r || !r->ok)
+				return 0;
+			const Track* cur = m_playlist.Current();
+			if (!cur || cur->audioPath != r->audioPath)
+				return 0;
+			if (!m_avatar.LoadImageFromFile(r->file))
+			{
+				DeleteFileW(r->file.c_str());   // 下到的不是有效图片，删掉，别留着坏文件
+				return 0;
+			}
+			Composite();
+			PushCoverToMainWindow(cur);   // 底部播放栏：会在 disk 目录里找到刚存的这张
 			return 0;
 		}
 		case WM_YU_TRACK_ENDED:
@@ -2087,9 +2119,13 @@ namespace YuMediaPlayer
 		// （LoadImageFromFile 加载失败时内部也会先清掉旧图，所以两条路径的结果一致。）
 		const std::wstring coverPath = track.coverPath.empty()
 			? FindCoverFor(track.audioPath, track.title, track.artist) : track.coverPath;
+		if (!coverPath.empty())
+			OutputDebugStringW((L"[Cover] already have cover, no download: " + coverPath + L"\n").c_str());
 		if (coverPath.empty())
 		{
 			m_avatar.ClearImage();
+			// disk 目录里还没有这首歌的封面：后台去网上找一张存进 exe目录\\disk，下好后自动换上（圆形封面 + 主窗口播放栏）
+			BeginCoverDownload(m_hwnd, track.audioPath, track.title, track.artist);
 		}
 		else if (!m_avatar.LoadImageFromFile(coverPath))
 		{
@@ -2334,6 +2370,402 @@ namespace YuMediaPlayer
 		return s == std::wstring::npos ? std::wstring(L".") : p.substr(0, s);
 	}
 
+	// ===== 自动下载封面（iTunes Search，不需要 key）=====
+	// 流程：歌名+歌手 -> 搜索 -> 取 artworkUrl（放大到 600x600）-> 下载 -> 存成 exe目录\disk\歌手 - 歌名.jpg
+	// 之后同一首歌（不管本地还是在线试听）都直接从 disk 目录读，不会再下载。
+
+	// 文件名里不能有的字符换成 _
+	static std::wstring SafeCoverName(std::wstring n)
+	{
+		for (wchar_t& c : n)
+			if (wcschr(L"\\/:*?\"<>|", c) || c < 32) c = L'_';
+		while (!n.empty() && (n.back() == L' ' || n.back() == L'.')) n.pop_back();
+		return n;
+	}
+
+	namespace
+	{
+		std::set<std::wstring> s_coverTried;   // 本次运行已经试过的歌（只在 UI 线程读写），失败了也不反复请求
+
+		std::wstring CoverToLower(std::wstring v)
+		{
+			if (!v.empty()) CharLowerBuffW(&v[0], (DWORD)v.size());
+			return v;
+		}
+
+		std::string CoverUrlEncode(const std::wstring& w)
+		{
+			std::string out;
+			if (w.empty()) return out;
+			const int n = WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), nullptr, 0, nullptr, nullptr);
+			std::string u(n, '\0');
+			WideCharToMultiByte(CP_UTF8, 0, w.c_str(), (int)w.size(), &u[0], n, nullptr, nullptr);
+			static const char* hex = "0123456789ABCDEF";
+			for (unsigned char c : u)
+			{
+				if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '-' || c == '_' || c == '.' || c == '~')
+					out += (char)c;
+				else { out += '%'; out += hex[c >> 4]; out += hex[c & 15]; }
+			}
+			return out;
+		}
+
+		std::wstring CoverUtf8ToWide(const std::string& u)
+		{
+			if (u.empty()) return std::wstring();
+			const int n = MultiByteToWideChar(CP_UTF8, 0, u.c_str(), (int)u.size(), nullptr, 0);
+			std::wstring w(n > 0 ? n : 0, L'\0');
+			if (n > 0) MultiByteToWideChar(CP_UTF8, 0, u.c_str(), (int)u.size(), &w[0], n);
+			return w;
+		}
+
+		// 调试输出：VS 的"输出"窗口里搜 [Cover] 能看到每一步
+		void CoverLog(const std::wstring& m) { OutputDebugStringW((L"[Cover] " + m + L"\n").c_str()); }
+
+		// WinHTTP GET（单次，指定代理方式），结果放进 out。只接受 HTTP 200，最大 8MB。
+		bool CoverHttpGetOnce(const std::wstring& url, DWORD accessType, const wchar_t* tag, std::string& out)
+		{
+			out.clear();
+			URL_COMPONENTSW uc = {};
+			uc.dwStructSize = sizeof(uc);
+			wchar_t host[256] = {}, path[2048] = {}, extra[4096] = {};
+			uc.lpszHostName = host;   uc.dwHostNameLength = 255;
+			uc.lpszUrlPath = path;    uc.dwUrlPathLength = 2047;
+			uc.lpszExtraInfo = extra; uc.dwExtraInfoLength = 4095;   // "?term=..." 查询串在这里，必须一起取出来拼回去
+			if (!WinHttpCrackUrl(url.c_str(), 0, 0, &uc))
+			{
+				CoverLog(std::wstring(tag) + L": CrackUrl failed err=" + std::to_wstring(GetLastError()));
+				return false;
+			}
+			const std::wstring fullPath = std::wstring(path) + extra;
+
+			bool ok = false;
+			HINTERNET ses = WinHttpOpen(L"Mozilla/5.0 YuMediaPlayer/1.0", accessType, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+			if (!ses) { CoverLog(std::wstring(tag) + L": WinHttpOpen failed err=" + std::to_wstring(GetLastError())); return false; }
+			WinHttpSetTimeouts(ses, 5000, 5000, 8000, 12000);
+			HINTERNET con = WinHttpConnect(ses, host, uc.nPort, 0);
+			if (!con) CoverLog(std::wstring(tag) + L": Connect failed err=" + std::to_wstring(GetLastError()));
+			else
+			{
+				const DWORD flags = (uc.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+				HINTERNET req = WinHttpOpenRequest(con, L"GET", fullPath.c_str(), nullptr, WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+				if (!req) CoverLog(std::wstring(tag) + L": OpenRequest failed err=" + std::to_wstring(GetLastError()));
+				else
+				{
+					if (!WinHttpSendRequest(req, L"Accept: */*\r\nAccept-Language: en-US,en;q=0.9\r\n", (DWORD)-1L, WINHTTP_NO_REQUEST_DATA, 0, 0, 0))
+						CoverLog(std::wstring(tag) + L": SendRequest failed err=" + std::to_wstring(GetLastError()));
+					else if (!WinHttpReceiveResponse(req, nullptr))
+						CoverLog(std::wstring(tag) + L": ReceiveResponse failed err=" + std::to_wstring(GetLastError()));
+					else
+					{
+						DWORD status = 0, sz = sizeof(status);
+						WinHttpQueryHeaders(req, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER, WINHTTP_HEADER_NAME_BY_INDEX, &status, &sz, WINHTTP_NO_HEADER_INDEX);
+						if (status != 200)
+							CoverLog(std::wstring(tag) + L": HTTP status " + std::to_wstring(status));
+						else
+						{
+							ok = true;
+							for (;;)
+							{
+								DWORD avail = 0;
+								if (!WinHttpQueryDataAvailable(req, &avail)) { CoverLog(std::wstring(tag) + L": QueryDataAvailable failed err=" + std::to_wstring(GetLastError())); ok = false; break; }
+								if (avail == 0) break;
+								const size_t old = out.size();
+								if (old + avail > 8u * 1024 * 1024) { ok = false; break; }
+								out.resize(old + avail);
+								DWORD got = 0;
+								if (!WinHttpReadData(req, &out[old], avail, &got)) { CoverLog(std::wstring(tag) + L": ReadData failed err=" + std::to_wstring(GetLastError())); ok = false; break; }
+								out.resize(old + got);
+							}
+							if (ok && out.empty()) CoverLog(std::wstring(tag) + L": empty body");
+						}
+					}
+					WinHttpCloseHandle(req);
+				}
+				WinHttpCloseHandle(con);
+			}
+			WinHttpCloseHandle(ses);
+			return ok && !out.empty();
+		}
+
+		// WinINet 兜底：WinHTTP 对服务器回应的格式检查很严（遇到不规范的回应会报 12152），WinINet 宽容得多。
+		// 用 LoadLibrary 动态加载，避免和 winhttp.h 同时包含 wininet.h 时的重复定义冲突。
+		bool CoverHttpGetInet(const std::wstring& url, std::string& out)
+		{
+			out.clear();
+			typedef HINTERNET(WINAPI* PInternetOpenW)(LPCWSTR, DWORD, LPCWSTR, LPCWSTR, DWORD);
+			typedef HINTERNET(WINAPI* PInternetOpenUrlW)(HINTERNET, LPCWSTR, LPCWSTR, DWORD, DWORD, DWORD_PTR);
+			typedef BOOL(WINAPI* PInternetReadFile)(HINTERNET, LPVOID, DWORD, LPDWORD);
+			typedef BOOL(WINAPI* PInternetCloseHandle)(HINTERNET);
+			typedef BOOL(WINAPI* PHttpQueryInfoW)(HINTERNET, DWORD, LPVOID, LPDWORD, LPDWORD);
+			typedef BOOL(WINAPI* PInternetSetOptionW)(HINTERNET, DWORD, LPVOID, DWORD);
+			HMODULE dll = LoadLibraryW(L"wininet.dll");
+			if (!dll) { CoverLog(L"wininet: LoadLibrary failed"); return false; }
+			auto fOpen = (PInternetOpenW)GetProcAddress(dll, "InternetOpenW");
+			auto fOpenUrl = (PInternetOpenUrlW)GetProcAddress(dll, "InternetOpenUrlW");
+			auto fRead = (PInternetReadFile)GetProcAddress(dll, "InternetReadFile");
+			auto fClose = (PInternetCloseHandle)GetProcAddress(dll, "InternetCloseHandle");
+			auto fQuery = (PHttpQueryInfoW)GetProcAddress(dll, "HttpQueryInfoW");
+			auto fSetOpt = (PInternetSetOptionW)GetProcAddress(dll, "InternetSetOptionW");
+			bool ok = false;
+			if (fOpen && fOpenUrl && fRead && fClose && fQuery && fSetOpt)
+			{
+				HINTERNET ses = fOpen(L"Mozilla/5.0 (Windows NT 10.0; Win64; x64) YuMediaPlayer/1.0", 0 /*PRECONFIG：用系统/IE 代理设置*/, nullptr, nullptr, 0);
+				if (!ses) CoverLog(L"wininet: InternetOpen failed err=" + std::to_wstring(GetLastError()));
+				else
+				{
+					DWORD to = 8000;
+					fSetOpt(ses, 2 /*CONNECT_TIMEOUT*/, &to, sizeof(to));
+					fSetOpt(ses, 5 /*SEND_TIMEOUT*/, &to, sizeof(to));
+					fSetOpt(ses, 6 /*RECEIVE_TIMEOUT*/, &to, sizeof(to));
+					// RELOAD | NO_CACHE_WRITE | NO_UI
+					HINTERNET h = fOpenUrl(ses, url.c_str(), L"Accept: */*\r\n", (DWORD)-1L, 0x80000000u | 0x04000000u | 0x00000200u, 0);
+					if (!h) CoverLog(L"wininet: OpenUrl failed err=" + std::to_wstring(GetLastError()));
+					else
+					{
+						DWORD status = 0, sz = sizeof(status), idx = 0;
+						fQuery(h, 19 /*STATUS_CODE*/ | 0x20000000 /*FLAG_NUMBER*/, &status, &sz, &idx);
+						if (status != 200)
+							CoverLog(L"wininet: HTTP status " + std::to_wstring(status));
+						else
+						{
+							ok = true;
+							char buf[16384];
+							for (;;)
+							{
+								DWORD got = 0;
+								if (!fRead(h, buf, sizeof(buf), &got)) { CoverLog(L"wininet: ReadFile failed err=" + std::to_wstring(GetLastError())); ok = false; break; }
+								if (got == 0) break;
+								if (out.size() + got > 8u * 1024 * 1024) { ok = false; break; }
+								out.append(buf, got);
+							}
+						}
+						fClose(h);
+					}
+					fClose(ses);
+				}
+			}
+			FreeLibrary(dll);
+			return ok && !out.empty();
+		}
+
+		// 依次试：WinINet -> WinHTTP 默认代理 -> 自动代理 -> 直连。
+		// 记住上次成功的方式，下次直接从它开始，不再每首歌都把失败的方式先走一遍。
+		bool CoverHttpGet(const std::string& urlUtf8, std::string& out)
+		{
+			const std::wstring url = CoverUtf8ToWide(urlUtf8);
+			static std::atomic<int> s_lastOk(0);   // 上次成功的方式下标（0 = WinINet）
+			const int kModes = 4;
+			const int first = s_lastOk.load();
+			for (int n = 0; n < kModes; n++)
+			{
+				const int i = (first + n) % kModes;
+				bool ok = false;
+				switch (i)
+				{
+				case 0: ok = CoverHttpGetInet(url, out); break;
+				case 1: ok = CoverHttpGetOnce(url, WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, L"default-proxy", out); break;
+				case 2: ok = CoverHttpGetOnce(url, WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, L"auto-proxy", out); break;
+				default: ok = CoverHttpGetOnce(url, WINHTTP_ACCESS_TYPE_NO_PROXY, L"direct", out); break;
+				}
+				if (ok)
+				{
+					s_lastOk.store(i);
+					return true;
+				}
+			}
+			return false;
+		}
+
+		// 从 JSON 片段里取 "key":"value"（处理 \" \\ \/ \uXXXX 转义），返回 UTF-8
+		std::string CoverJsonString(const std::string& js, const char* key)
+		{
+			const std::string pat = std::string("\"") + key + "\":";
+			size_t p = js.find(pat);
+			if (p == std::string::npos) return std::string();
+			p += pat.size();
+			while (p < js.size() && (js[p] == ' ' || js[p] == '\n' || js[p] == '\r' || js[p] == '\t')) p++;
+			if (p >= js.size() || js[p] != '"') return std::string();   // 不是字符串值
+			p++;
+			std::string v;
+			while (p < js.size() && js[p] != '"')
+			{
+				if (js[p] == '\\' && p + 1 < js.size())
+				{
+					const char e = js[p + 1];
+					if (e == 'u' && p + 5 < js.size())
+					{
+						const unsigned cp = (unsigned)strtoul(js.substr(p + 2, 4).c_str(), nullptr, 16);
+						wchar_t w = (wchar_t)cp;
+						char u8[8] = {};
+						const int n = WideCharToMultiByte(CP_UTF8, 0, &w, 1, u8, 8, nullptr, nullptr);
+						if (n > 0) v.append(u8, n);
+						p += 6;
+						continue;
+					}
+					v += (e == 'n') ? '\n' : e;   // \" \\ \/ 直接取后一个字符
+					p += 2;
+					continue;
+				}
+				v += js[p++];
+			}
+			return v;
+		}
+
+		// 比较用的规范化：小写，去掉 (...) （...） [...] 里的内容，去掉空格和常见符号
+		std::wstring CoverNorm(const std::wstring& s)
+		{
+			std::wstring out;
+			int depth = 0;
+			for (wchar_t c : CoverToLower(s))
+			{
+				if (c == L'(' || c == L'[' || c == 0xFF08 || c == 0x3010) { depth++; continue; }
+				if (c == L')' || c == L']' || c == 0xFF09 || c == 0x3011) { if (depth > 0) depth--; continue; }
+				if (depth > 0) continue;
+				if (iswspace(c) || wcschr(L"-_.,!?'\u2019\u00B7&", c)) continue;
+				out += c;
+			}
+			return out;
+		}
+		bool CoverContainsEither(const std::wstring& a, const std::wstring& b)
+		{
+			return !a.empty() && !b.empty() && (a.find(b) != std::wstring::npos || b.find(a) != std::wstring::npos);
+		}
+		// 歌手可能是 "A/B"、"A & B"、"A、B"：任意一位对上就算
+		bool CoverArtistMatch(const std::wstring& want, const std::wstring& got)
+		{
+			std::wstring piece;
+			std::vector<std::wstring> pieces;
+			for (wchar_t c : want)
+			{
+				if (wcschr(L"/&,;\u3001\uFF0F", c)) { pieces.push_back(piece); piece.clear(); }
+				else piece += c;
+			}
+			pieces.push_back(piece);
+			const std::wstring g = CoverNorm(got);
+			for (const auto& pc : pieces)
+				if (CoverContainsEither(CoverNorm(pc), g)) return true;
+			return false;
+		}
+
+		// 在搜索结果里挑一首标题（和歌手）对得上的，返回它的封面地址（600x600）
+		std::string CoverPickFromJson(const std::string& json, const std::wstring& title, const std::wstring& artist, bool needArtist)
+		{
+			const std::wstring nt = CoverNorm(title);
+			std::string titleOnly;
+			size_t pos = 0;
+			while ((pos = json.find("\"wrapperType\"", pos)) != std::string::npos)
+			{
+				size_t next = json.find("\"wrapperType\"", pos + 13);
+				const std::string chunk = json.substr(pos, next == std::string::npos ? std::string::npos : next - pos);
+				pos = (next == std::string::npos) ? json.size() : next;
+
+				std::string art = CoverJsonString(chunk, "artworkUrl100");
+				if (art.empty()) continue;
+				const size_t k = art.find("/100x100");
+				if (k != std::string::npos) art.replace(k, 8, "/600x600");
+
+				if (!CoverContainsEither(nt, CoverNorm(CoverUtf8ToWide(CoverJsonString(chunk, "trackName")))))
+					continue;
+				if (artist.empty() || CoverArtistMatch(artist, CoverUtf8ToWide(CoverJsonString(chunk, "artistName"))))
+					return art;                       // 歌名、歌手都对上
+				if (!needArtist && titleOnly.empty())
+					titleOnly = art;                  // 只有歌名对上，先记着
+			}
+			return needArtist ? std::string() : titleOnly;
+		}
+
+		const wchar_t* CoverImageExt(const std::string& b)
+		{
+			if (b.size() > 4 && (unsigned char)b[0] == 0xFF && (unsigned char)b[1] == 0xD8) return L".jpg";
+			if (b.size() > 4 && (unsigned char)b[0] == 0x89 && b[1] == 'P' && b[2] == 'N' && b[3] == 'G') return L".png";
+			return nullptr;
+		}
+	}
+
+	static void BeginCoverDownload(HWND hwnd, const std::wstring& audioPath, const std::wstring& title, const std::wstring& artist)
+	{
+		if (!hwnd || title.empty())
+		{
+			CoverLog(L"skip: empty title");
+			return;
+		}
+		if (!s_coverTried.insert(artist + L"\x1" + title).second)
+			return;   // 这首歌本次运行已经试过了
+		CoverLog(L"begin: " + artist + L" - " + title + L"  -> " + ExeDir() + L"\\disk");
+
+		std::thread([hwnd, audioPath, title, artist]()
+		{
+			CoverResult* r = new CoverResult();
+			r->audioPath = audioPath;
+
+			std::string artUrl;
+			const std::wstring both = artist.empty() ? title : artist + L" " + title;
+			struct Try { const std::wstring* term; const char* country; bool needArtist; };
+			const Try tries[] = {
+				{ &both, "cn", true },
+				{ &both, "us", true },
+				{ &title, "cn", false },     // 最后只用歌名搜一次（歌手名对不上时），要求歌名对得上
+			};
+			for (const Try& t : tries)
+			{
+				if (t.term == &title && artist.empty()) break;   // 和第一次一样，不重复
+				std::string json;
+				const std::string url = "https://itunes.apple.com/search?media=music&entity=song&limit=10&country=" + std::string(t.country)
+					+ "&term=" + CoverUrlEncode(*t.term);
+				CoverLog(L"search: " + CoverUtf8ToWide(url));
+				if (!CoverHttpGet(url, json))
+				{
+					CoverLog(L"search request failed");
+					continue;
+				}
+				artUrl = CoverPickFromJson(json, title, artist, t.needArtist);
+				CoverLog(artUrl.empty() ? L"no matching result" : L"matched: " + CoverUtf8ToWide(artUrl));
+				if (!artUrl.empty())
+					break;
+			}
+
+			std::string img;
+			if (!artUrl.empty() && !CoverHttpGet(artUrl, img))
+				CoverLog(L"image download failed");
+			if (!artUrl.empty() && !img.empty())
+			{
+				if (const wchar_t* ext = CoverImageExt(img))
+				{
+					const std::wstring dir = ExeDir() + L"\\disk";
+					CreateDirectoryW(dir.c_str(), nullptr);   // 已存在会失败，忽略
+					const std::wstring name = SafeCoverName(artist.empty() ? title : artist + L" - " + title);
+					const std::wstring finalPath = dir + L"\\" + name + ext;
+					const std::wstring tmpPath = finalPath + L".tmp";
+					HANDLE h = CreateFileW(tmpPath.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+					if (h != INVALID_HANDLE_VALUE)
+					{
+						DWORD written = 0;
+						const BOOL wrote = WriteFile(h, img.data(), (DWORD)img.size(), &written, nullptr) && written == img.size();
+						CloseHandle(h);
+						if (wrote && MoveFileExW(tmpPath.c_str(), finalPath.c_str(), MOVEFILE_REPLACE_EXISTING))
+						{
+							r->ok = true;
+							r->file = finalPath;
+						}
+						else
+						{
+							CoverLog(L"save failed err=" + std::to_wstring(GetLastError()) + L" path=" + finalPath);
+							DeleteFileW(tmpPath.c_str());
+						}
+					}
+					else
+						CoverLog(L"cannot create file err=" + std::to_wstring(GetLastError()) + L" path=" + tmpPath);
+				}
+				else
+					CoverLog(L"downloaded data is not jpg/png");
+			}
+			OutputDebugStringW((std::wstring(L"[Cover] ") + title + (r->ok ? L" -> " + r->file : L" (not found)") + L"\n").c_str());
+			if (!IsWindow(hwnd) || !PostMessageW(hwnd, WM_YU_COVER_READY, 0, (LPARAM)r))
+				delete r;
+		}).detach();
+	}
+
 	// 找一首歌的封面图。按下面的顺序在这些目录里找，同名（歌曲文件名 / 歌名 / "歌手 - 歌名"）的 jpg/jpeg/png/bmp：
 	//   1) 音频文件所在目录      2) 音频目录\\disk      3) 音频目录的上一级\\disk
 	//   4) exe目录\\disk         5) exe目录\\song\\disk   6) exe目录\\background\\disk
@@ -2367,8 +2799,12 @@ namespace YuMediaPlayer
 		std::vector<std::wstring> names;
 		auto addName = [&](const std::wstring& n)
 		{
-			if (!n.empty())
-				names.push_back(lower(n));
+			if (n.empty())
+				return;
+			names.push_back(lower(n));
+			const std::wstring safe = SafeCoverName(n);   // 自动下载的封面文件名里 \\/:*?"<>| 被替换成了 _
+			if (safe != n)
+				names.push_back(lower(safe));
 		};
 		addName(base);
 		addName(title);
